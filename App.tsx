@@ -14,24 +14,17 @@ export default function App() {
   useEffect(() => {
     async function initDatabase() {
       try {
-        console.log('🗄️ Création des tables...');
         await createTables();
-        
-        console.log('🌱 Insertion des données de test...');
         await seedDatabase();
-        
-        console.log('✅ Base de données prête !');
         setIsReady(true);
       } catch (err) {
         console.error('❌ Erreur BDD :', err);
         setError(String(err));
       }
     }
-
     initDatabase();
   }, []);
 
-  // Écran de chargement
   if (error) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
@@ -49,7 +42,6 @@ export default function App() {
     );
   }
 
-  // Application normale
   return (
     <SafeAreaProvider>
       <NavigationContainer>

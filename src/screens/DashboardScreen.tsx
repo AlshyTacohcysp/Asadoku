@@ -1,41 +1,62 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { COLORS, FONT_SIZES, SPACING, SHADOWS } from '../constants/theme';
-import { getCoursByJour, Cours } from '../services/CoursService';
-import { getTodosByDate, Todo } from '../services/TodoService';
+import { Modal } from "react-native";
+import React, { useEffect, useState } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  ActivityIndicator,
+  TouchableOpacity,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { COLORS, FONT_SIZES, SPACING, SHADOWS } from "../constants/theme";
+import { getCoursByJour, Cours } from "../services/CoursService";
+import { getTodosByDate, Todo } from "../services/TodoService";
+import ChronometreTrajet from "../components/trajet/ChronoTerTrajet";
+import { saveTrajet, getMoyenneTrajet } from "../services/TrajetService";
 
 export default function DashboardScreen() {
   const [coursDuJour, setCoursDuJour] = useState<Cours[]>([]);
   const [todosDuJour, setTodosDuJour] = useState<Todo[]>([]);
   const [loading, setLoading] = useState(true);
-
+//   const [moyenneTrajet, setMoyenneTrajet] = useState(0);
+  const [showChrono, setShowChrono] = useState(false);
+  const [moyenneTrajet, setMoyenneTrajet] = useState(0);
   // Date du jour en français
   const aujourdhui = new Date();
   const options: Intl.DateTimeFormatOptions = {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
   };
-  const dateTexte = aujourdhui.toLocaleDateString('fr-FR', options);
-  
+  const dateTexte = aujourdhui.toLocaleDateString("fr-FR", options);
+
   // Jour de la semaine (pour les cours)
-  const joursFrancais = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
+  const joursFrancais = [
+    "Dimanche",
+    "Lundi",
+    "Mardi",
+    "Mercredi",
+    "Jeudi",
+    "Vendredi",
+    "Samedi",
+  ];
   const jourActuel = joursFrancais[aujourdhui.getDay()];
-  
+
   // Date au format YYYY-MM-DD (pour les todos)
-  const dateISO = aujourdhui.toISOString().split('T')[0];
+  const dateISO = aujourdhui.toISOString().split("T")[0];
 
   useEffect(() => {
     async function loadData() {
       try {
         const cours = await getCoursByJour(jourActuel);
         const todos = await getTodosByDate(dateISO);
+        const moyenne = await getMoyenneTrajet();
+        setMoyenneTrajet(Math.round(moyenne));
         setCoursDuJour(cours);
         setTodosDuJour(todos);
       } catch (error) {
-        console.error('Erreur chargement dashboard:', error);
+        console.error("Erreur chargement dashboard:", error);
       } finally {
         setLoading(false);
       }
@@ -45,10 +66,18 @@ export default function DashboardScreen() {
 
   // Déterminer le prochain cours
   const heureActuelle = aujourdhui.getHours() * 60 + aujourdhui.getMinutes();
-  const prochainCours = coursDuJour.find(cours => {
-    const [h, m] = cours.heure_debut.split(':').map(Number);
-    return (h * 60 + m) > heureActuelle;
+  const prochainCours = coursDuJour.find((cours) => {
+    const [h, m] = cours.heure_debut.split(":").map(Number);
+    return h * 60 + m > heureActuelle;
   });
+
+  useEffect(() => {
+    async function loadMoyenne() {
+      const moyenne = await getMoyenneTrajet();
+      setMoyenneTrajet(Math.round(moyenne));
+    }
+    loadMoyenne();
+  }, [showChrono]); // Se recharge quand on ferme le chrono
 
   // Afficher max 3 todos
   const todosAffiches = todosDuJour.slice(0, 3);
@@ -103,7 +132,12 @@ export default function DashboardScreen() {
             todosAffiches.map((todo, index) => (
               <View key={todo.id} style={styles.todoItem}>
                 <View style={styles.todoHeader}>
-                  <View style={[styles.priorityBadge, { backgroundColor: getPriorityColor(todo.priorite) }]}>
+                  <View
+                    style={[
+                      styles.priorityBadge,
+                      { backgroundColor: getPriorityColor(todo.priorite) },
+                    ]}
+                  >
                     <Text style={styles.priorityText}>P{todo.priorite}</Text>
                   </View>
                   <Text style={styles.todoTitle} numberOfLines={1}>
@@ -121,27 +155,87 @@ export default function DashboardScreen() {
             </View>
           )}
           {todosDuJour.length > 3 && (
-            <Text style={styles.moreText}>+{todosDuJour.length - 3} autres tâches</Text>
+            <Text style={styles.moreText}>
+              +{todosDuJour.length - 3} autres tâches
+            </Text>
           )}
         </View>
 
         {/* Boutons d'action */}
         <View style={styles.actions}>
-          <View style={styles.actionButton}>
-            <Text style={styles.actionText}>🚶 Démarrer trajet</Text>
-          </View>
-          <View style={[styles.actionButton, styles.actionButtonPrimary]}>
+          <TouchableOpacity
+            style={styles.actionButton}
+            onPress={() => setShowChrono(true)}
+          >
+            <Text style={styles.actionText}>🚶 Trajet</Text>
+            {moyenneTrajet > 0 && (
+              <Text style={styles.actionSubtext}>
+                ~{Math.round(moyenneTrajet / 60)} min
+              </Text>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.actionButton, styles.actionButtonPrimary]}
+          >
             <Text style={[styles.actionText, styles.actionTextWhite]}>
               ⏱️ Lancer révision
             </Text>
-          </View>
+          </TouchableOpacity>
         </View>
-
         {/* Alarme de secours */}
         <View style={styles.alarmeSecours}>
           <Text style={styles.alarmeText}>⏰ Définir alarme système</Text>
         </View>
       </View>
+      <Modal
+        visible={showChrono}
+        animationType="slide"
+        presentationStyle="pageSheet"
+      >
+        <SafeAreaView style={{ flex: 1, backgroundColor: "#F5F7FA" }}>
+          <View
+            style={{
+              flexDirection: "row",
+              justifyContent: "space-between",
+              alignItems: "center",
+              paddingHorizontal: 16,
+              paddingVertical: 12,
+            }}
+          >
+            <Text style={{ fontSize: 20, fontWeight: "700" }}>
+              🚶 Chronomètre trajet
+            </Text>
+            <TouchableOpacity onPress={() => setShowChrono(false)}>
+              <Text
+                style={{ fontSize: 16, color: "#4A90D9", fontWeight: "600" }}
+              >
+                Fermer
+              </Text>
+            </TouchableOpacity>
+          </View>
+          <ChronometreTrajet
+            onTrajetEnd={async (duree: number) => {
+              const now = new Date().toISOString();
+              const jours = [
+                "Dimanche",
+                "Lundi",
+                "Mardi",
+                "Mercredi",
+                "Jeudi",
+                "Vendredi",
+                "Samedi",
+              ];
+              await saveTrajet({
+                depart: new Date(Date.now() - duree * 1000).toISOString(),
+                arrivee: now,
+                duree_secondes: duree,
+                jour_semaine: jours[new Date().getDay()],
+                moyen_transport: "pied",
+              });
+            }}
+          />
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -149,13 +243,13 @@ export default function DashboardScreen() {
 // Helper pour la couleur de priorité
 function getPriorityColor(priorite: number): string {
   const colors: Record<number, string> = {
-    5: '#FF3B30',
-    4: '#FF9500',
-    3: '#FFCC00',
-    2: '#34C759',
-    1: '#8E8E93',
+    5: "#FF3B30",
+    4: "#FF9500",
+    3: "#FFCC00",
+    2: "#34C759",
+    1: "#8E8E93",
   };
-  return colors[priorite] || '#8E8E93';
+  return colors[priorite] || "#8E8E93";
 }
 
 const styles = StyleSheet.create({
@@ -165,8 +259,8 @@ const styles = StyleSheet.create({
   },
   loadingContainer: {
     flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: "center",
+    alignItems: "center",
   },
   header: {
     paddingHorizontal: SPACING.lg,
@@ -176,7 +270,7 @@ const styles = StyleSheet.create({
   date: {
     fontSize: FONT_SIZES.md,
     color: COLORS.textLight,
-    textTransform: 'capitalize',
+    textTransform: "capitalize",
   },
   content: {
     flex: 1,
@@ -191,16 +285,22 @@ const styles = StyleSheet.create({
   },
   cardTitle: {
     fontSize: FONT_SIZES.lg,
-    fontWeight: '700',
+    fontWeight: "700",
     color: COLORS.text,
     marginBottom: SPACING.sm,
+  },
+  actionSubtext: {
+    fontSize: 11,
+    color: "#4A90D9",
+    fontWeight: "600",
+    marginTop: 2,
   },
   coursInfo: {
     gap: SPACING.xs,
   },
   matiere: {
     fontSize: FONT_SIZES.lg,
-    fontWeight: '700',
+    fontWeight: "700",
     color: COLORS.primary,
   },
   detail: {
@@ -211,8 +311,8 @@ const styles = StyleSheet.create({
     marginBottom: SPACING.sm,
   },
   todoHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: SPACING.sm,
   },
   priorityBadge: {
@@ -223,7 +323,7 @@ const styles = StyleSheet.create({
   priorityText: {
     color: COLORS.surface,
     fontSize: FONT_SIZES.xs,
-    fontWeight: '700',
+    fontWeight: "700",
   },
   todoTitle: {
     flex: 1,
@@ -233,23 +333,23 @@ const styles = StyleSheet.create({
   emptyText: {
     fontSize: FONT_SIZES.md,
     color: COLORS.textLight,
-    textAlign: 'center',
+    textAlign: "center",
     marginTop: SPACING.md,
   },
   hint: {
     fontSize: FONT_SIZES.xs,
     color: COLORS.grey,
-    textAlign: 'center',
+    textAlign: "center",
     marginTop: SPACING.xs,
   },
   moreText: {
     fontSize: FONT_SIZES.xs,
     color: COLORS.primary,
-    textAlign: 'center',
+    textAlign: "center",
     marginTop: SPACING.sm,
   },
   actions: {
-    flexDirection: 'row',
+    flexDirection: "row",
     gap: SPACING.sm,
     marginTop: SPACING.sm,
   },
@@ -258,7 +358,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surface,
     borderRadius: 12,
     padding: SPACING.md,
-    alignItems: 'center',
+    alignItems: "center",
     borderWidth: 1,
     borderColor: COLORS.grey,
   },
@@ -269,7 +369,7 @@ const styles = StyleSheet.create({
   actionText: {
     fontSize: FONT_SIZES.sm,
     color: COLORS.text,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   actionTextWhite: {
     color: COLORS.surface,
@@ -278,12 +378,17 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.secondary,
     borderRadius: 12,
     padding: SPACING.md,
-    alignItems: 'center',
+    alignItems: "center",
     marginTop: SPACING.sm,
   },
   alarmeText: {
     color: COLORS.surface,
     fontSize: FONT_SIZES.md,
-    fontWeight: '600',
+    fontWeight: "600",
+  },
+  actionSubtext: {
+    fontSize: 11,
+    color: "#8E8E93",
+    marginTop: 2,
   },
 });
