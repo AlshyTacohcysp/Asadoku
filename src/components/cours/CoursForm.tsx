@@ -272,12 +272,16 @@ export default function CoursForm({
             </Text>
           </TouchableOpacity>
         </ScrollView>
-
         <HeurePicker
           visible={showHeureDebut}
           heure={heureDebutH}
           minute={heureDebutM}
-          onHeure={setHeureDebutH}
+          onHeure={(h: string) => {
+            setHeureDebutH(h);
+            // Auto +2h pour la fin
+            const finH = (parseInt(h) + 2) % 24;
+            setHeureFinH(String(finH).padStart(2, "0"));
+          }}
           onMinute={setHeureDebutM}
           onClose={() => setShowHeureDebut(false)}
           label="Heure de début"
@@ -286,7 +290,7 @@ export default function CoursForm({
           visible={showHeureFin}
           heure={heureFinH}
           minute={heureFinM}
-          onHeure={handleHeureDebutChange}
+          onHeure={setHeureFinH}
           onMinute={setHeureFinM}
           onClose={() => setShowHeureFin(false)}
           label="Heure de fin"
