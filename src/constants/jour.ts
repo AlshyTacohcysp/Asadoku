@@ -4,6 +4,8 @@ export const JOURS = [
   'Mercredi',
   'Jeudi',
   'Vendredi',
+  'Samedi',
+  'Dimanche',
 ] as const;
 
 export type Jour = typeof JOURS[number];

@@ -33,6 +33,13 @@ export async function getTodosByDate(date: string): Promise<Todo[]> {
   return result;
 }
 
+export async function getAllTodos(): Promise<Todo[]> {
+  const db = await getDatabase();
+  return await db.getAllAsync<Todo>(
+    'SELECT * FROM todo ORDER BY fait ASC, priorite DESC, date DESC'
+  );
+}
+
 export async function addTodo(todo: Omit<Todo, 'id' | 'fait' | 'progression' | 'notes_personnelles'>): Promise<void> {
   const db = await getDatabase();
   await db.runAsync(

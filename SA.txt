@@ -1,0 +1,4 @@
+npm install --global eas-cli
+npx create-expo-app asadoku
+cd asadoku && 
+eas init --id 91b004f0-5ca9-4c47-bf3f-6892a9dcb054
