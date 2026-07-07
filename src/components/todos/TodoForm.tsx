@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import {
-  View, Text, StyleSheet, TextInput, TouchableOpacity,
-  Modal, ScrollView, Alert,
+  View, Text, StyleSheet, TextInput, TouchableOpacity, Modal, ScrollView, Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { addTodo } from '../../services/TodoService';
@@ -14,13 +13,17 @@ interface Props {
   cours: Cours[];
 }
 
+const HEURES = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0'));
+const MINUTES = ['00', '15', '30', '45'];
+
 export default function TodoForm({ visible, onClose, onTodoAdded, cours }: Props) {
   const [titre, setTitre] = useState('');
   const [description, setDescription] = useState('');
-  const [heurePensee, setHeurePensee] = useState('');
+  const [heureH, setHeureH] = useState('08');
+  const [heureM, setHeureM] = useState('00');
   const [priorite, setPriorite] = useState(3);
   const [coursId, setCoursId] = useState<number | null>(null);
-
+  const [showHeure, setShowHeure] = useState(false);
   const today = new Date().toISOString().split('T')[0];
 
   const handleSubmit = async () => {
@@ -33,20 +36,17 @@ export default function TodoForm({ visible, onClose, onTodoAdded, cours }: Props
         titre: titre.trim(),
         description: description.trim(),
         date: today,
-        heure_pensee: heurePensee,
+        heure_pensee: `${heureH}:${heureM}`,
         priorite,
         categorie: '',
         cours_id: coursId,
       });
-      setTitre('');
-      setDescription('');
-      setHeurePensee('');
-      setPriorite(3);
-      setCoursId(null);
+      setTitre(''); setDescription(''); setHeureH('08'); setHeureM('00');
+      setPriorite(3); setCoursId(null);
       onTodoAdded();
       onClose();
     } catch (error) {
-      Alert.alert('Erreur', "Impossible d'ajouter la tâche");
+      Alert.alert('Erreur', "Impossible d'ajouter");
     }
   };
 
@@ -68,13 +68,16 @@ export default function TodoForm({ visible, onClose, onTodoAdded, cours }: Props
           <TextInput style={styles.input} value={titre} onChangeText={setTitre} placeholder="Ex: Réviser le chapitre 3" placeholderTextColor="#C7C7CC" />
 
           <Text style={styles.label}>Description</Text>
-          <TextInput style={[styles.input, styles.textarea]} value={description} onChangeText={setDescription} placeholder="Détails..." placeholderTextColor="#C7C7CC" multiline numberOfLines={3} />
+          <TextInput style={[styles.input, { height: 80, textAlignVertical: 'top' }]} value={description} onChangeText={setDescription} placeholder="Détails..." placeholderTextColor="#C7C7CC" multiline />
 
           <Text style={styles.label}>Heure pensée</Text>
-          <TextInput style={styles.input} value={heurePensee} onChangeText={setHeurePensee} placeholder="HH:MM" placeholderTextColor="#C7C7CC" keyboardType="numbers-and-punctuation" />
+          <TouchableOpacity style={styles.heureBtn} onPress={() => setShowHeure(true)}>
+            <Ionicons name="time-outline" size={20} color="#4A90D9" />
+            <Text style={styles.heureText}>{heureH}:{heureM}</Text>
+          </TouchableOpacity>
 
           <Text style={styles.label}>Priorité : {priorite}</Text>
-          <View style={styles.priorityRow}>
+          <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
             {[1, 2, 3, 4, 5].map(p => (
               <TouchableOpacity key={p} style={[styles.prioBtn, priorite === p && { backgroundColor: '#4A90D9' }]} onPress={() => setPriorite(p)}>
                 <Text style={[styles.prioText, priorite === p && { color: '#fff' }]}>{p}</Text>
@@ -83,7 +86,7 @@ export default function TodoForm({ visible, onClose, onTodoAdded, cours }: Props
           </View>
 
           <Text style={styles.label}>Associer à un cours</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.coursList}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
             <TouchableOpacity style={[styles.coursBtn, coursId === null && { backgroundColor: '#4A90D9' }]} onPress={() => setCoursId(null)}>
               <Text style={[styles.coursBtnText, coursId === null && { color: '#fff' }]}>Aucun</Text>
             </TouchableOpacity>
@@ -94,6 +97,36 @@ export default function TodoForm({ visible, onClose, onTodoAdded, cours }: Props
             ))}
           </ScrollView>
         </ScrollView>
+
+        {showHeure && (
+          <View style={styles.pickerOverlay}>
+            <View style={styles.pickerContainer}>
+              <View style={styles.pickerHeader}>
+                <Text style={styles.pickerTitle}>Heure pensée</Text>
+                <TouchableOpacity onPress={() => setShowHeure(false)}>
+                  <Text style={{ color: '#4A90D9', fontWeight: '700', fontSize: 16 }}>OK</Text>
+                </TouchableOpacity>
+              </View>
+              <View style={{ flexDirection: 'row', height: 200 }}>
+                <ScrollView style={{ flex: 1 }}>
+                  {HEURES.map(h => (
+                    <TouchableOpacity key={h} style={[styles.pickerItem, heureH === h && styles.pickerItemActive]} onPress={() => setHeureH(h)}>
+                      <Text style={[styles.pickerItemText, heureH === h && styles.pickerItemTextActive]}>{h}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+                <Text style={{ fontSize: 24, fontWeight: '700', alignSelf: 'center', marginHorizontal: 4 }}>:</Text>
+                <ScrollView style={{ flex: 1 }}>
+                  {MINUTES.map(m => (
+                    <TouchableOpacity key={m} style={[styles.pickerItem, heureM === m && styles.pickerItemActive]} onPress={() => setHeureM(m)}>
+                      <Text style={[styles.pickerItemText, heureM === m && styles.pickerItemTextActive]}>{m}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+            </View>
+          </View>
+        )}
       </View>
     </Modal>
   );
@@ -107,11 +140,18 @@ const styles = StyleSheet.create({
   form: { flex: 1, paddingHorizontal: 16, paddingTop: 16 },
   label: { fontSize: 13, fontWeight: '600', color: '#8E8E93', marginBottom: 4, marginTop: 14 },
   input: { backgroundColor: '#fff', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, fontSize: 15, borderWidth: 1, borderColor: '#E5E5EA', color: '#1A1A1A' },
-  textarea: { height: 80, textAlignVertical: 'top' },
-  priorityRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
+  heureBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, borderWidth: 1, borderColor: '#E5E5EA', gap: 10 },
+  heureText: { fontSize: 16, color: '#1A1A1A', fontWeight: '600' },
   prioBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#fff', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#E5E5EA' },
   prioText: { fontSize: 16, fontWeight: '700' },
-  coursList: { marginTop: 4 },
   coursBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: '#fff', marginRight: 8, borderWidth: 1, borderColor: '#E5E5EA' },
   coursBtnText: { fontSize: 13, color: '#1A1A1A' },
+  pickerOverlay: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.4)', flex: 1, justifyContent: 'flex-end' },
+  pickerContainer: { backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingBottom: 30 },
+  pickerHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#E5E5EA' },
+  pickerTitle: { fontSize: 16, fontWeight: '700' },
+  pickerItem: { paddingVertical: 12, alignItems: 'center', borderRadius: 8, marginHorizontal: 8 },
+  pickerItemActive: { backgroundColor: '#E8F0FE' },
+  pickerItemText: { fontSize: 18, color: '#1A1A1A' },
+  pickerItemTextActive: { color: '#4A90D9', fontWeight: '700' },
 });

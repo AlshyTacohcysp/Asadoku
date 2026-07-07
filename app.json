@@ -6,26 +6,35 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": false,
+    "newArchEnabled": true,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.tacohcyp.asadoku"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
-      }
-    },
-    "web": {
-      "favicon": "./assets/favicon.png"
+      },
+      "package": "com.tacohcyp.asadoku"
     },
     "plugins": [
-      "expo-sqlite"
-    ]
+      "expo-sqlite",
+      "expo-notifications",
+      "expo-font",
+      "expo-asset",
+      "expo-build-properties"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "6bd7e3fb-9797-49c4-8d4a-060f21ea029d"
+      }
+    },
+    "owner": "tacohcysp"
   }
 }

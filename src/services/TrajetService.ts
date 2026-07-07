@@ -30,3 +30,22 @@ export async function getMoyenneTrajet(): Promise<number> {
   );
   return result?.moyenne || 0;
 }
+
+export async function getPredictionTrajet(): Promise<number> {
+  const db = await getDatabase();
+  const today = new Date();
+  const jours = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
+  const jourActuel = jours[today.getDay()];
+  
+  const result = await db.getFirstAsync<{ moyenne: number }>(
+    'SELECT AVG(duree_secondes) as moyenne FROM trajet WHERE jour_semaine = ?',
+    [jourActuel]
+  );
+  
+  if (result?.moyenne) return Math.round(result.moyenne);
+  
+  const general = await db.getFirstAsync<{ moyenne: number }>(
+    'SELECT AVG(duree_secondes) as moyenne FROM trajet'
+  );
+  return general?.moyenne ? Math.round(general.moyenne) : 15 * 60;
+}

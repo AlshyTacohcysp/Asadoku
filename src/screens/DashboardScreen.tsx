@@ -1,11 +1,16 @@
-import { Modal } from "react-native";
 import React, { useEffect, useState } from "react";
+
+import { useNavigation } from "@react-navigation/native";
 import {
   View,
   Text,
   StyleSheet,
   ActivityIndicator,
   TouchableOpacity,
+  Alert,
+  Platform,
+  ScrollView,
+  Modal,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { COLORS, FONT_SIZES, SPACING, SHADOWS } from "../constants/theme";
@@ -14,24 +19,34 @@ import { getTodosByDate, Todo } from "../services/TodoService";
 import ChronometreTrajet from "../components/trajet/ChronoTerTrajet";
 import { saveTrajet, getMoyenneTrajet } from "../services/TrajetService";
 
+function getPriorityColor(priorite: number): string {
+  const colors: Record<number, string> = {
+    5: "#FF3B30",
+    4: "#FF9500",
+    3: "#FFCC00",
+    2: "#34C759",
+    1: "#8E8E93",
+  };
+  return colors[priorite] || "#8E8E93";
+}
+
 export default function DashboardScreen() {
+  const navigation = useNavigation<any>();
   const [coursDuJour, setCoursDuJour] = useState<Cours[]>([]);
+  const [coursDemain, setCoursDemain] = useState<Cours[]>([]);
   const [todosDuJour, setTodosDuJour] = useState<Todo[]>([]);
   const [loading, setLoading] = useState(true);
-//   const [moyenneTrajet, setMoyenneTrajet] = useState(0);
   const [showChrono, setShowChrono] = useState(false);
   const [moyenneTrajet, setMoyenneTrajet] = useState(0);
-  // Date du jour en français
+
   const aujourdhui = new Date();
-  const options: Intl.DateTimeFormatOptions = {
+  const dateTexte = aujourdhui.toLocaleDateString("fr-FR", {
     weekday: "long",
     day: "numeric",
     month: "long",
     year: "numeric",
-  };
-  const dateTexte = aujourdhui.toLocaleDateString("fr-FR", options);
+  });
 
-  // Jour de la semaine (pour les cours)
   const joursFrancais = [
     "Dimanche",
     "Lundi",
@@ -42,21 +57,26 @@ export default function DashboardScreen() {
     "Samedi",
   ];
   const jourActuel = joursFrancais[aujourdhui.getDay()];
-
-  // Date au format YYYY-MM-DD (pour les todos)
   const dateISO = aujourdhui.toISOString().split("T")[0];
 
   useEffect(() => {
     async function loadData() {
       try {
-        const cours = await getCoursByJour(jourActuel);
-        const todos = await getTodosByDate(dateISO);
-        const moyenne = await getMoyenneTrajet();
-        setMoyenneTrajet(Math.round(moyenne));
+        const [cours, todos, moyenne] = await Promise.all([
+          getCoursByJour(jourActuel),
+          getTodosByDate(dateISO),
+          getMoyenneTrajet(),
+        ]);
+        const demain = new Date();
+        demain.setDate(demain.getDate() + 1);
+        const jourDemain = joursFrancais[demain.getDay()];
+        const coursDemainData = await getCoursByJour(jourDemain);
         setCoursDuJour(cours);
+        setCoursDemain(coursDemainData);
         setTodosDuJour(todos);
+        setMoyenneTrajet(Math.round(moyenne));
       } catch (error) {
-        console.error("Erreur chargement dashboard:", error);
+        console.error("Erreur:", error);
       } finally {
         setLoading(false);
       }
@@ -64,134 +84,181 @@ export default function DashboardScreen() {
     loadData();
   }, []);
 
-  // Déterminer le prochain cours
+  useEffect(() => {
+    async function refreshMoyenne() {
+      const m = await getMoyenneTrajet();
+      setMoyenneTrajet(Math.round(m));
+    }
+    refreshMoyenne();
+  }, [showChrono]);
+
   const heureActuelle = aujourdhui.getHours() * 60 + aujourdhui.getMinutes();
-  const prochainCours = coursDuJour.find((cours) => {
-    const [h, m] = cours.heure_debut.split(":").map(Number);
+  const prochainCours = coursDuJour.find((c) => {
+    const [h, m] = c.heure_debut.split(":").map(Number);
     return h * 60 + m > heureActuelle;
   });
 
-  useEffect(() => {
-    async function loadMoyenne() {
-      const moyenne = await getMoyenneTrajet();
-      setMoyenneTrajet(Math.round(moyenne));
-    }
-    loadMoyenne();
-  }, [showChrono]); // Se recharge quand on ferme le chrono
-
-  // Afficher max 3 todos
   const todosAffiches = todosDuJour.slice(0, 3);
+
+  const handleAlarmeSecours = async () => {
+    const demain = new Date();
+    demain.setDate(demain.getDate() + 1);
+    const jourDemain = joursFrancais[demain.getDay()];
+    const coursDemainData = await getCoursByJour(jourDemain);
+    if (coursDemainData.length === 0) {
+      Alert.alert("Pas de cours demain", "Profitez de votre journee !");
+      return;
+    }
+    const premier = coursDemainData[0];
+    const [h, m] = premier.heure_debut.split(":").map(Number);
+    let ah = h,
+      am = m - 30;
+    if (am < 0) {
+      ah -= 1;
+      am += 60;
+    }
+    if (Platform.OS === "android") {
+      try {
+        const { startActivityAsync } = require("expo-intent-launcher");
+        await startActivityAsync("android.intent.action.SET_ALARM", {
+          extra: {
+            "android.intent.extra.alarm.HOUR": ah,
+            "android.intent.extra.alarm.MINUTES": am,
+            "android.intent.extra.alarm.MESSAGE": `Depart pour ${premier.matiere}`,
+          },
+        });
+      } catch {
+        Alert.alert(
+          "Alarme",
+          `Reglez votre alarme a ${String(ah).padStart(2, "0")}:${String(am).padStart(2, "0")} pour ${premier.matiere}.`,
+        );
+      }
+    } else {
+      Alert.alert(
+        "Alarme",
+        `Reglez votre alarme a ${String(ah).padStart(2, "0")}:${String(am).padStart(2, "0")} pour ${premier.matiere}.`,
+      );
+    }
+  };
 
   if (loading) {
     return (
       <SafeAreaView style={styles.container}>
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={COLORS.primary} />
-        </View>
+        <ActivityIndicator
+          size="large"
+          color="#4A90D9"
+          style={{ marginTop: 100 }}
+        />
       </SafeAreaView>
     );
   }
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* En-tête */}
-      <View style={styles.header}>
-        <Text style={styles.date}>{dateTexte}</Text>
-      </View>
-
-      {/* Contenu */}
-      <View style={styles.content}>
-        {/* Carte "Prochain cours" */}
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>📚 Prochain cours</Text>
-          {prochainCours ? (
-            <View style={styles.coursInfo}>
-              <Text style={styles.matiere}>{prochainCours.matiere}</Text>
-              <Text style={styles.detail}>
-                🕐 {prochainCours.heure_debut} - {prochainCours.heure_fin}
-              </Text>
-              <Text style={styles.detail}>📍 {prochainCours.salle}</Text>
-              <Text style={styles.detail}>👨‍🏫 {prochainCours.professeur}</Text>
-            </View>
-          ) : coursDuJour.length > 0 ? (
-            <Text style={styles.emptyText}>Plus de cours aujourd'hui 🎉</Text>
-          ) : (
-            <View>
-              <Text style={styles.emptyText}>Aucun cours aujourd'hui</Text>
-              <Text style={styles.hint}>
-                Ajoutez votre emploi du temps dans l'onglet Cours
-              </Text>
-            </View>
-          )}
+      <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+        <View style={styles.header}>
+          <Text style={styles.date}>{dateTexte}</Text>
         </View>
+        <View style={styles.content}>
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>📚 Prochain cours</Text>
+            {prochainCours ? (
+              <View>
+                <Text style={styles.matiere}>{prochainCours.matiere}</Text>
+                <Text style={styles.detail}>
+                  🕐 {prochainCours.heure_debut} - {prochainCours.heure_fin}
+                </Text>
+                <Text style={styles.detail}>📍 {prochainCours.salle}</Text>
+                <Text style={styles.detail}>👨‍🏫 {prochainCours.professeur}</Text>
+              </View>
+            ) : coursDuJour.length > 0 ? (
+              <Text style={styles.emptyText}>Plus de cours aujourd'hui 🎉</Text>
+            ) : (
+              <Text style={styles.emptyText}>Aucun cours aujourd'hui</Text>
+            )}
+          </View>
 
-        {/* Carte "À faire" */}
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>📝 À faire aujourd'hui</Text>
-          {todosAffiches.length > 0 ? (
-            todosAffiches.map((todo, index) => (
-              <View key={todo.id} style={styles.todoItem}>
-                <View style={styles.todoHeader}>
-                  <View
-                    style={[
-                      styles.priorityBadge,
-                      { backgroundColor: getPriorityColor(todo.priorite) },
-                    ]}
-                  >
-                    <Text style={styles.priorityText}>P{todo.priorite}</Text>
-                  </View>
-                  <Text style={styles.todoTitle} numberOfLines={1}>
-                    {todo.titre}
+          {coursDemain.length > 0 && (
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>📅 Demain</Text>
+              {coursDemain.slice(0, 2).map((c) => (
+                <View key={c.id} style={{ marginBottom: 8 }}>
+                  <Text style={styles.matiere}>{c.matiere}</Text>
+                  <Text style={styles.detail}>
+                    🕐 {c.heure_debut} - {c.heure_fin} 📍 {c.salle}
                   </Text>
                 </View>
-              </View>
-            ))
-          ) : (
-            <View>
-              <Text style={styles.emptyText}>Aucune tâche</Text>
-              <Text style={styles.hint}>
-                Ajoutez vos tâches dans l'onglet Tâches
-              </Text>
+              ))}
+              {coursDemain.length > 2 && (
+                <Text style={styles.moreText}>
+                  +{coursDemain.length - 2} autres cours
+                </Text>
+              )}
             </View>
           )}
-          {todosDuJour.length > 3 && (
-            <Text style={styles.moreText}>
-              +{todosDuJour.length - 3} autres tâches
-            </Text>
-          )}
-        </View>
 
-        {/* Boutons d'action */}
-        <View style={styles.actions}>
-          <TouchableOpacity
-            style={styles.actionButton}
-            onPress={() => setShowChrono(true)}
-          >
-            <Text style={styles.actionText}>🚶 Trajet</Text>
-            {moyenneTrajet > 0 && (
-              <Text style={styles.actionSubtext}>
-                ~{Math.round(moyenneTrajet / 60)} min
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>📝 À faire aujourd'hui</Text>
+            {todosAffiches.length > 0 ? (
+              todosAffiches.map((todo) => (
+                <View key={todo.id} style={styles.todoItem}>
+                  <View style={styles.todoHeader}>
+                    <View
+                      style={[
+                        styles.priorityBadge,
+                        { backgroundColor: getPriorityColor(todo.priorite) },
+                      ]}
+                    >
+                      <Text style={styles.priorityText}>P{todo.priorite}</Text>
+                    </View>
+                    <Text style={styles.todoTitle} numberOfLines={1}>
+                      {todo.titre}
+                    </Text>
+                  </View>
+                </View>
+              ))
+            ) : (
+              <Text style={styles.emptyText}>Aucune tâche</Text>
+            )}
+            {todosDuJour.length > 3 && (
+              <Text style={styles.moreText}>
+                +{todosDuJour.length - 3} autres tâches
               </Text>
             )}
-          </TouchableOpacity>
+          </View>
+
+          <View style={styles.actions}>
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => setShowChrono(true)}
+            >
+              <Text style={styles.actionText}>🚶 Trajet</Text>
+              {moyenneTrajet > 0 && (
+                <Text style={styles.actionSubtext}>
+                  ~{Math.round(moyenneTrajet / 60)} min
+                </Text>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.actionButton, styles.actionButtonPrimary]}
+              onPress={() => navigation.navigate("Étude")}
+            >
+              <Text style={[styles.actionText, styles.actionTextWhite]}>
+                ⏱️ Révision
+              </Text>
+            </TouchableOpacity>
+          </View>
+
           <TouchableOpacity
-            style={[styles.actionButton, styles.actionButtonPrimary]}
+            style={styles.alarmeSecours}
+            onPress={handleAlarmeSecours}
           >
-            <Text style={[styles.actionText, styles.actionTextWhite]}>
-              ⏱️ Lancer révision
-            </Text>
+            <Text style={styles.alarmeText}>⏰ Definir alarme systeme</Text>
           </TouchableOpacity>
         </View>
-        {/* Alarme de secours */}
-        <View style={styles.alarmeSecours}>
-          <Text style={styles.alarmeText}>⏰ Définir alarme système</Text>
-        </View>
-      </View>
-      <Modal
-        visible={showChrono}
-        animationType="slide"
-        presentationStyle="pageSheet"
-      >
+      </ScrollView>
+
+      <Modal visible={showChrono} animationType="slide">
         <SafeAreaView style={{ flex: 1, backgroundColor: "#F5F7FA" }}>
           <View
             style={{
@@ -203,7 +270,7 @@ export default function DashboardScreen() {
             }}
           >
             <Text style={{ fontSize: 20, fontWeight: "700" }}>
-              🚶 Chronomètre trajet
+              🚶 Chronometre trajet
             </Text>
             <TouchableOpacity onPress={() => setShowChrono(false)}>
               <Text
@@ -216,20 +283,11 @@ export default function DashboardScreen() {
           <ChronometreTrajet
             onTrajetEnd={async (duree: number) => {
               const now = new Date().toISOString();
-              const jours = [
-                "Dimanche",
-                "Lundi",
-                "Mardi",
-                "Mercredi",
-                "Jeudi",
-                "Vendredi",
-                "Samedi",
-              ];
               await saveTrajet({
                 depart: new Date(Date.now() - duree * 1000).toISOString(),
                 arrivee: now,
                 duree_secondes: duree,
-                jour_semaine: jours[new Date().getDay()],
+                jour_semaine: joursFrancais[new Date().getDay()],
                 moyen_transport: "pied",
               });
             }}
@@ -240,155 +298,67 @@ export default function DashboardScreen() {
   );
 }
 
-// Helper pour la couleur de priorité
-function getPriorityColor(priorite: number): string {
-  const colors: Record<number, string> = {
-    5: "#FF3B30",
-    4: "#FF9500",
-    3: "#FFCC00",
-    2: "#34C759",
-    1: "#8E8E93",
-  };
-  return colors[priorite] || "#8E8E93";
-}
-
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  header: {
-    paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.md,
-    paddingBottom: SPACING.sm,
-  },
-  date: {
-    fontSize: FONT_SIZES.md,
-    color: COLORS.textLight,
-    textTransform: "capitalize",
-  },
-  content: {
-    flex: 1,
-    paddingHorizontal: SPACING.md,
-  },
+  container: { flex: 1, backgroundColor: "#F5F7FA" },
+  header: { paddingHorizontal: 24, paddingTop: 16, paddingBottom: 8 },
+  date: { fontSize: 16, color: "#8E8E93", textTransform: "capitalize" },
+  content: { paddingHorizontal: 16, paddingBottom: 30 },
   card: {
-    backgroundColor: COLORS.surface,
+    backgroundColor: "#fff",
     borderRadius: 16,
-    padding: SPACING.lg,
-    marginBottom: SPACING.md,
-    ...SHADOWS.card,
+    padding: 20,
+    marginBottom: 14,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
   },
   cardTitle: {
-    fontSize: FONT_SIZES.lg,
+    fontSize: 18,
     fontWeight: "700",
-    color: COLORS.text,
-    marginBottom: SPACING.sm,
+    color: "#1A1A1A",
+    marginBottom: 10,
   },
-  actionSubtext: {
-    fontSize: 11,
-    color: "#4A90D9",
-    fontWeight: "600",
-    marginTop: 2,
-  },
-  coursInfo: {
-    gap: SPACING.xs,
-  },
-  matiere: {
-    fontSize: FONT_SIZES.lg,
-    fontWeight: "700",
-    color: COLORS.primary,
-  },
-  detail: {
-    fontSize: FONT_SIZES.sm,
-    color: COLORS.textLight,
-  },
-  todoItem: {
-    marginBottom: SPACING.sm,
-  },
-  todoHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: SPACING.sm,
-  },
-  priorityBadge: {
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  priorityText: {
-    color: COLORS.surface,
-    fontSize: FONT_SIZES.xs,
-    fontWeight: "700",
-  },
-  todoTitle: {
-    flex: 1,
-    fontSize: FONT_SIZES.sm,
-    color: COLORS.text,
-  },
+  matiere: { fontSize: 16, fontWeight: "700", color: "#4A90D9" },
+  detail: { fontSize: 14, color: "#8E8E93" },
+  todoItem: { marginBottom: 8 },
+  todoHeader: { flexDirection: "row", alignItems: "center", gap: 8 },
+  priorityBadge: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 4 },
+  priorityText: { color: "#fff", fontSize: 12, fontWeight: "700" },
+  todoTitle: { flex: 1, fontSize: 14, color: "#1A1A1A" },
   emptyText: {
-    fontSize: FONT_SIZES.md,
-    color: COLORS.textLight,
+    fontSize: 16,
+    color: "#8E8E93",
     textAlign: "center",
-    marginTop: SPACING.md,
-  },
-  hint: {
-    fontSize: FONT_SIZES.xs,
-    color: COLORS.grey,
-    textAlign: "center",
-    marginTop: SPACING.xs,
+    marginTop: 16,
   },
   moreText: {
-    fontSize: FONT_SIZES.xs,
-    color: COLORS.primary,
+    fontSize: 12,
+    color: "#4A90D9",
     textAlign: "center",
-    marginTop: SPACING.sm,
+    marginTop: 8,
   },
-  actions: {
-    flexDirection: "row",
-    gap: SPACING.sm,
-    marginTop: SPACING.sm,
-  },
+  actions: { flexDirection: "row", gap: 10, marginTop: 4 },
   actionButton: {
     flex: 1,
-    backgroundColor: COLORS.surface,
+    backgroundColor: "#fff",
     borderRadius: 12,
-    padding: SPACING.md,
+    padding: 16,
     alignItems: "center",
     borderWidth: 1,
-    borderColor: COLORS.grey,
+    borderColor: "#E5E5EA",
   },
-  actionButtonPrimary: {
-    backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
-  },
-  actionText: {
-    fontSize: FONT_SIZES.sm,
-    color: COLORS.text,
-    fontWeight: "600",
-  },
-  actionTextWhite: {
-    color: COLORS.surface,
-  },
+  actionButtonPrimary: { backgroundColor: "#4A90D9", borderColor: "#4A90D9" },
+  actionText: { fontSize: 14, color: "#1A1A1A", fontWeight: "600" },
+  actionTextWhite: { color: "#fff" },
+  actionSubtext: { fontSize: 11, color: "#8E8E93", marginTop: 2 },
   alarmeSecours: {
-    backgroundColor: COLORS.secondary,
+    backgroundColor: "#34C759",
     borderRadius: 12,
-    padding: SPACING.md,
+    padding: 16,
     alignItems: "center",
-    marginTop: SPACING.sm,
+    marginTop: 10,
   },
-  alarmeText: {
-    color: COLORS.surface,
-    fontSize: FONT_SIZES.md,
-    fontWeight: "600",
-  },
-  actionSubtext: {
-    fontSize: 11,
-    color: "#8E8E93",
-    marginTop: 2,
-  },
+  alarmeText: { color: "#fff", fontSize: 16, fontWeight: "600" },
 });
