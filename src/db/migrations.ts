@@ -1,4 +1,4 @@
-import { getDatabase } from './database';
+import { getDatabase } from "./database";
 
 export async function createTables(): Promise<void> {
   const db = await getDatabase();
@@ -45,6 +45,7 @@ export async function createTables(): Promise<void> {
       priorite INTEGER DEFAULT 3 CHECK(priorite >= 1 AND priorite <= 5),
       categorie TEXT DEFAULT '',
       cours_id INTEGER,
+      recurrence TEXT DEFAULT 'none',
       methode_revision TEXT DEFAULT '',
       progression INTEGER DEFAULT 0,
       notes_personnelles TEXT DEFAULT '',
@@ -103,5 +104,13 @@ export async function createTables(): Promise<void> {
     );
   `);
 
-  console.log('✅ Tables créées avec succès !');
+  console.log("✅ Tables créées avec succès !");
+  // Ajouter la colonne recurrence si elle n'existe pas
+  try {
+    await db.execAsync(
+      'ALTER TABLE todo ADD COLUMN recurrence TEXT DEFAULT "none"',
+    );
+  } catch (e) {
+    // Colonne déjà existante
+  }
 }
