@@ -1,63 +1,70 @@
 import { getDatabase } from './database';
 
+/**
+ * Le seed n'est exécuté qu'une seule fois dans la vie de l'application :
+ * il est gardé par l'existence d'une ligne dans `parametres` (jamais par le
+ * nombre de cours, afin de ne pas réinjecter des données de démo après que
+ * l'utilisateur a vidé son emploi du temps).
+ */
 export async function seedDatabase(): Promise<void> {
   const db = await getDatabase();
 
-  // Vérifier si des données existent déjà
-  const countResult = await db.getFirstAsync<{ count: number }>(
-    'SELECT COUNT(*) as count FROM cours'
+  const existing = await db.getFirstAsync<{ count: number }>(
+    'SELECT COUNT(*) as count FROM parametres',
   );
-
-  if (countResult && countResult.count > 0) {
-    console.log('📦 Données déjà présentes, pas besoin de seed');
+  if (existing && existing.count > 0) {
+    console.log('📦 Base déjà initialisée — seed ignoré');
     return;
   }
 
-  // 1. Insérer les paramètres par défaut
+  console.log('🌱 Première ouverture : création des données de démarrage…');
+
+  // 1. Paramètres par défaut
   await db.runAsync(
     `INSERT INTO parametres (nom, temps_preparation, temps_trajet, marge_securite)
      VALUES (?, ?, ?, ?)`,
-    ['Alex', 20, 15, 5]
+    ['Alex', 20, 15, 5],
   );
 
-  // 2. Insérer des cours d'exemple
-  const coursData = [
-    ['Lundi', '08:30', '10:30', 'Mathématiques', 'Amphi A', 'M. Dupont'],
-    ['Lundi', '10:45', '12:45', 'Physique', 'Salle 101', 'Mme Martin'],
-    ['Mardi', '09:00', '11:00', 'Informatique', 'Salle 204', 'M. Bernard'],
-    ['Mardi', '14:00', '16:00', 'Anglais', 'Salle 305', 'Mme Smith'],
-    ['Mercredi', '08:30', '10:30', 'Mathématiques', 'Amphi A', 'M. Dupont'],
-    ['Jeudi', '10:00', '12:00', 'Chimie', 'Labo 1', 'M. Petit'],
-    ['Vendredi', '13:00', '15:00', 'Projet Tutoré', 'Salle 102', 'M. Durand'],
+  // 2. Cours d'exemple (les ids sont récupérés pour lier les tâches)
+  const coursData: Array<{ jour: string; hd: string; hf: string; matiere: string; salle: string; prof: string }> = [
+    { jour: 'Lundi', hd: '08:30', hf: '10:30', matiere: 'Mathématiques', salle: 'Amphi A', prof: 'M. Dupont' },
+    { jour: 'Lundi', hd: '10:45', hf: '12:45', matiere: 'Physique', salle: 'Salle 101', prof: 'Mme Martin' },
+    { jour: 'Mardi', hd: '09:00', hf: '11:00', matiere: 'Informatique', salle: 'Salle 204', prof: 'M. Bernard' },
+    { jour: 'Mardi', hd: '14:00', hf: '16:00', matiere: 'Anglais', salle: 'Salle 305', prof: 'Mme Smith' },
+    { jour: 'Mercredi', hd: '08:30', hf: '10:30', matiere: 'Mathématiques', salle: 'Amphi A', prof: 'M. Dupont' },
+    { jour: 'Jeudi', hd: '10:00', hf: '12:00', matiere: 'Chimie', salle: 'Labo 1', prof: 'M. Petit' },
+    { jour: 'Vendredi', hd: '13:00', hf: '15:00', matiere: 'Projet Tutoré', salle: 'Salle 102', prof: 'M. Durand' },
   ];
 
-  for (const cours of coursData) {
-    await db.runAsync(
+  const ids: number[] = [];
+  for (const c of coursData) {
+    const result = await db.runAsync(
       `INSERT INTO cours (jour, heure_debut, heure_fin, matiere, salle, professeur)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      cours
+      [c.jour, c.hd, c.hf, c.matiere, c.salle, c.prof],
     );
+    ids.push(Number(result.lastInsertRowId));
   }
 
-  // 3. Insérer des todos d'exemple
-  const today = new Date().toISOString().split('T')[0]; // Date du jour
+  // 3. Tâches d'exemple du jour (liées aux cours insérés ci-dessus)
+  const aujourdhui = new Date();
+  const dateISO = `${aujourdhui.getFullYear()}-${String(aujourdhui.getMonth() + 1).padStart(2, '0')}-${String(aujourdhui.getDate()).padStart(2, '0')}`;
 
   const todoData = [
-    ['Réviser le chapitre 3 de Maths', 'Faire les exercices 1 à 10', today, '08:00', 5, 1],
-    ['Préparer le TP de Physique', 'Lire le protocole expérimental', today, '09:00', 4, 2],
-    ['Faire les flashcards d\'Anglais', 'Vocabulaire unité 5', today, '10:00', 3, 4],
-    ['Avancer le projet tutoré', 'Rédiger l\'introduction', today, '11:00', 2, 7],
+    { titre: 'Réviser le chapitre 3 de Maths', description: 'Faire les exercices 1 à 10', heure: '08:00', priorite: 5, coursId: ids[0] },
+    { titre: 'Préparer le TP de Physique', description: "Lire le protocole expérimental", heure: '09:00', priorite: 4, coursId: ids[1] },
+    { titre: "Faire les flashcards d'Anglais", description: 'Vocabulaire unité 5', heure: '10:00', priorite: 3, coursId: ids[3] },
+    { titre: 'Avancer le projet tutoré', description: "Rédiger l'introduction", heure: '11:00', priorite: 2, coursId: ids[6] },
   ];
 
-  for (const todo of todoData) {
+  for (const t of todoData) {
     await db.runAsync(
       `INSERT INTO todo (titre, description, date, heure_pensee, priorite, cours_id)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      todo
+      [t.titre, t.description, dateISO, t.heure, t.priorite, t.coursId ?? null],
     );
   }
 
-  console.log('✅ Données de test insérées avec succès !');
-  console.log('   - 7 cours créés');
-  console.log('   - 4 todos créés');
+  console.log(`✅ Données de démarrage : ${coursData.length} cours, ${todoData.length} tâches`);
 }

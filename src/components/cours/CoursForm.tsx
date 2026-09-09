@@ -1,392 +1,331 @@
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  View,
-  Text,
+  Alert,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  ScrollView,
   StyleSheet,
+  Text,
   TextInput,
   TouchableOpacity,
-  Modal,
-  ScrollView,
-  Alert,
-} from "react-native";
-import { Ionicons } from "@expo/vector-icons";
-import { addCours, updateCours, Cours } from "../../services/CoursService";
-import { JOURS } from "../../constants/jour";
+  View,
+} from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useAppStyles, useThemeColors } from '../../context/ThemeContext';
+import { addCours, updateCours, verifierConflitCours, type Cours } from '../../services/CoursService';
+import { syncNotifications } from '../../services/AlarmeService';
+import { JOURS } from '../../constants/jour';
+import { RADIUS, SPACING } from '../../constants/theme';
+import HeurePicker from '../ui/HeurePicker';
 
 interface Props {
   visible: boolean;
   onClose: () => void;
-  onCoursAdded: () => void;
+  onSaved: () => void;
   editingCours?: Cours | null;
 }
 
-const HEURES = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, "0"));
-const MINUTES = ["00", "15", "30", "45"];
+function enMinutes(h: string, m: string): number {
+  return (Number(h) || 0) * 60 + (Number(m) || 0);
+}
+function enHHMM(total: number): { h: string; m: string } {
+  const h = Math.floor(total / 60) % 24;
+  const m = total % 60;
+  return { h: String(h).padStart(2, '0'), m: String(m).padStart(2, '0') };
+}
 
-export default function CoursForm({
-  visible,
-  onClose,
-  onCoursAdded,
-  editingCours,
-}: Props) {
-  const [jour, setJour] = useState("Lundi");
-  const [heureDebutH, setHeureDebutH] = useState("08");
-  const [heureDebutM, setHeureDebutM] = useState("00");
-  const [heureFinH, setHeureFinH] = useState("10");
-  const [heureFinM, setHeureFinM] = useState("00");
-  const [matiere, setMatiere] = useState("");
-  const [salle, setSalle] = useState("");
-  const [professeur, setProfesseur] = useState("");
-  const [showHeureDebut, setShowHeureDebut] = useState(false);
-  const [showHeureFin, setShowHeureFin] = useState(false);
+const DUREE_PAR_DEFAUT = 2 * 60;
+
+export default function CoursForm({ visible, onClose, onSaved, editingCours }: Props) {
+  const colors = useThemeColors();
+  const styles = useAppStyles(createStyles);
+
+  const [jour, setJour] = useState<(typeof JOURS)[number]>('Lundi');
+  const [matiere, setMatiere] = useState('');
+  const [salle, setSalle] = useState('');
+  const [professeur, setProfesseur] = useState('');
+  const [debutMin, setDebutMin] = useState(8 * 60);
+  const [finMin, setFinMin] = useState(10 * 60);
+  // Dès que l'utilisateur ajuste la fin manuellement, l'auto-report cesse.
+  const finManuelle = useRef(false);
+  const [picker, setPicker] = useState<'debut' | 'fin' | null>(null);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    if (!visible) return;
     if (editingCours) {
-      setJour(editingCours.jour);
-      const [hdH, hdM] = editingCours.heure_debut.split(":");
-      const [hfH, hfM] = editingCours.heure_fin.split(":");
-      setHeureDebutH(hdH);
-      setHeureDebutM(hdM);
-      setHeureFinH(hfH);
-      setHeureFinM(hfM);
+      setJour(editingCours.jour as (typeof JOURS)[number]);
       setMatiere(editingCours.matiere);
       setSalle(editingCours.salle);
-      setProfesseur(editingCours.professeur || "");
+      setProfesseur(editingCours.professeur || '');
+      const [hd, hdM] = editingCours.heure_debut.split(':');
+      const [hf, hfM] = editingCours.heure_fin.split(':');
+      setDebutMin(enMinutes(hd, hdM));
+      setFinMin(enMinutes(hf, hfM));
+      finManuelle.current = true;
     } else {
-      setJour("Lundi");
-      setHeureDebutH("08");
-      setHeureDebutM("00");
-      setHeureFinH("10");
-      setHeureFinM("00");
-      setMatiere("");
-      setSalle("");
-      setProfesseur("");
+      setJour('Lundi');
+      setMatiere('');
+      setSalle('');
+      setProfesseur('');
+      setDebutMin(8 * 60);
+      setFinMin(10 * 60);
+      finManuelle.current = false;
     }
-  }, [editingCours]);
+    setPicker(null);
+    setSaving(false);
+  }, [visible, editingCours]);
 
-  const handleHeureDebutChange = (h: string) => {
-    setHeureDebutH(h);
-    // Auto +2h pour la fin
-    const finH = (parseInt(h) + 2) % 24;
-    setHeureFinH(String(finH).padStart(2, "0"));
+  const changerDebut = (minutes: number) => {
+    const borné = Math.max(0, Math.min(24 * 60 - 15, minutes));
+    setDebutMin(borné);
+    if (!finManuelle.current) {
+      const duree = finMin - debutMin > 0 ? finMin - debutMin : DUREE_PAR_DEFAUT;
+      setFinMin(Math.min(24 * 60, borné + duree));
+    }
   };
 
-  const handleSubmit = async () => {
+  const changerFin = (minutes: number) => {
+    finManuelle.current = true;
+    setFinMin(Math.min(24 * 60, minutes));
+  };
+
+  const validerEtSauver = async (forcer: boolean) => {
     if (!matiere.trim() || !salle.trim()) {
-      Alert.alert("Erreur", "Matière et salle obligatoires");
+      Alert.alert('Champs requis', 'La matière et la salle sont obligatoires.');
       return;
     }
-    try {
-      const data = {
-        jour,
-        heure_debut: `${heureDebutH}:${heureDebutM}`,
-        heure_fin: `${heureFinH}:${heureFinM}`,
-        matiere: matiere.trim(),
-        salle: salle.trim(),
-        professeur: professeur.trim(),
-      };
-      if (editingCours) {
-        await updateCours(editingCours.id, data);
-      } else {
-        await addCours(data);
+    if (finMin <= debutMin) {
+      Alert.alert('Horaires invalides', "L'heure de fin doit être postérieure à l'heure de début.");
+      return;
+    }
+    const saisie = {
+      jour,
+      heure_debut: `${enHHMM(debutMin).h}:${enHHMM(debutMin).m}`,
+      heure_fin: `${enHHMM(finMin).h}:${enHHMM(finMin).m}`,
+      matiere: matiere.trim(),
+      salle: salle.trim(),
+      professeur: professeur.trim(),
+    };
+
+    if (!forcer) {
+      const conflit = await verifierConflitCours(saisie, editingCours?.id);
+      if (conflit) {
+        Alert.alert(
+          'Créneau en conflit',
+          `Un autre cours occupe déjà le ${jour} sur ce créneau. Ajouter quand même ?`,
+          [
+            { text: 'Annuler', style: 'cancel' },
+            { text: 'Ajouter quand même', style: 'destructive', onPress: () => validerEtSauver(true) },
+          ],
+        );
+        return;
       }
-      onCoursAdded();
+    }
+
+    setSaving(true);
+    try {
+      if (editingCours) {
+        await updateCours(editingCours.id, saisie);
+      } else {
+        await addCours(saisie);
+      }
+      // Recalcule alarmes + rappels (jour et horaires peuvent avoir changé).
+      await syncNotifications().catch(() => {});
+      onSaved();
       onClose();
-    } catch (error) {
-      Alert.alert("Erreur", "Impossible d'enregistrer");
+    } catch (err) {
+      Alert.alert('Enregistrement impossible', err instanceof Error ? err.message : 'Réessayez.');
+    } finally {
+      setSaving(false);
     }
   };
 
-  const HeurePicker = ({
-    visible,
-    heure,
-    minute,
-    onHeure,
-    onMinute,
-    onClose,
-    label,
-  }: any) => {
-    if (!visible) return null;
-    return (
-      <View style={styles.pickerOverlay}>
-        <View style={styles.pickerContainer}>
-          <View style={styles.pickerHeader}>
-            <Text style={styles.pickerTitle}>{label}</Text>
-            <TouchableOpacity onPress={onClose}>
-              <Text
-                style={{ color: "#4A90D9", fontWeight: "700", fontSize: 16 }}
-              >
-                OK
-              </Text>
-            </TouchableOpacity>
-          </View>
-          <View style={{ flexDirection: "row", height: 200 }}>
-            <ScrollView
-              style={{ flex: 1 }}
-              showsVerticalScrollIndicator={false}
-            >
-              {HEURES.map((h) => (
-                <TouchableOpacity
-                  key={h}
-                  style={[
-                    styles.pickerItem,
-                    heure === h && styles.pickerItemActive,
-                  ]}
-                  onPress={() => onHeure(h)}
-                >
-                  <Text
-                    style={[
-                      styles.pickerItemText,
-                      heure === h && styles.pickerItemTextActive,
-                    ]}
-                  >
-                    {h}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-            <Text
-              style={{
-                fontSize: 24,
-                fontWeight: "700",
-                alignSelf: "center",
-                marginHorizontal: 4,
-              }}
-            >
-              :
-            </Text>
-            <ScrollView
-              style={{ flex: 1 }}
-              showsVerticalScrollIndicator={false}
-            >
-              {MINUTES.map((m) => (
-                <TouchableOpacity
-                  key={m}
-                  style={[
-                    styles.pickerItem,
-                    minute === m && styles.pickerItemActive,
-                  ]}
-                  onPress={() => onMinute(m)}
-                >
-                  <Text
-                    style={[
-                      styles.pickerItemText,
-                      minute === m && styles.pickerItemTextActive,
-                    ]}
-                  >
-                    {m}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-        </View>
-      </View>
-    );
-  };
+  const { h: dh, m: dm } = enHHMM(debutMin);
+  const { h: fh, m: fm } = enHHMM(finMin);
 
   return (
-    <Modal
-      visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
-    >
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={onClose}>
-            <Ionicons name="close" size={28} color="#1A1A1A" />
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <KeyboardAvoidingView
+        style={[styles.container, { backgroundColor: colors.background }]}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        <View style={[styles.header, { borderBottomColor: colors.border, backgroundColor: colors.surface }]}>
+          <TouchableOpacity onPress={onClose} hitSlop={10}>
+            <Ionicons name="close" size={26} color={colors.textLight} />
           </TouchableOpacity>
-          <Text style={styles.title}>
-            {editingCours ? "Modifier" : "Nouveau cours"}
+          <Text style={[styles.title, { color: colors.text }]}>
+            {editingCours ? 'Modifier le cours' : 'Nouveau cours'}
           </Text>
-          <TouchableOpacity onPress={handleSubmit}>
-            <Text style={styles.save}>
-              {editingCours ? "Modifier" : "Ajouter"}
+          <TouchableOpacity onPress={() => validerEtSauver(false)} disabled={saving} hitSlop={10}>
+            <Text style={[styles.save, { color: colors.primary, opacity: saving ? 0.5 : 1 }]}>
+              {saving ? '…' : 'Enregistrer'}
             </Text>
           </TouchableOpacity>
         </View>
-        <ScrollView style={styles.form}>
-          <Text style={styles.label}>Jour</Text>
-          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-            {JOURS.map((j) => (
-              <TouchableOpacity
-                key={j}
-                style={[styles.jourBtn, jour === j && styles.jourBtnActive]}
-                onPress={() => setJour(j)}
-              >
-                <Text
-                  style={[styles.jourText, jour === j && styles.jourTextActive]}
+
+        <ScrollView
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={styles.form}
+          showsVerticalScrollIndicator={false}
+        >
+          <Text style={[styles.label, { color: colors.textLight }]}>Jour</Text>
+          <View style={styles.jours}>
+            {JOURS.map((j) => {
+              const actif = jour === j;
+              return (
+                <TouchableOpacity
+                  key={j}
+                  style={[styles.chip, actif && { backgroundColor: colors.primary, borderColor: colors.primary }]}
+                  onPress={() => setJour(j)}
+                  activeOpacity={0.7}
                 >
-                  {j.substring(0, 3)}
-                </Text>
-              </TouchableOpacity>
-            ))}
+                  <Text style={[styles.chipTexte, { color: actif ? colors.onPrimary : colors.text }]}>
+                    {j.slice(0, 3)}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
 
-          <Text style={styles.label}>Matière *</Text>
+          <Text style={[styles.label, { color: colors.textLight }]}>Matière *</Text>
           <TextInput
-            style={styles.input}
+            style={[styles.input, { backgroundColor: colors.surface, borderColor: colors.border, color: colors.text }]}
             value={matiere}
             onChangeText={setMatiere}
-            placeholder="Ex: Mathématiques"
-            placeholderTextColor="#C7C7CC"
+            placeholder="Ex : Mathématiques"
+            placeholderTextColor={colors.placeholder}
+            returnKeyType="next"
           />
 
-          <Text style={styles.label}>Salle *</Text>
+          <Text style={[styles.label, { color: colors.textLight }]}>Salle *</Text>
           <TextInput
-            style={styles.input}
+            style={[styles.input, { backgroundColor: colors.surface, borderColor: colors.border, color: colors.text }]}
             value={salle}
             onChangeText={setSalle}
-            placeholder="Ex: Amphi A"
-            placeholderTextColor="#C7C7CC"
+            placeholder="Ex : Amphi A"
+            placeholderTextColor={colors.placeholder}
           />
 
-          <Text style={styles.label}>Professeur</Text>
+          <Text style={[styles.label, { color: colors.textLight }]}>Professeur (optionnel)</Text>
           <TextInput
-            style={styles.input}
+            style={[styles.input, { backgroundColor: colors.surface, borderColor: colors.border, color: colors.text }]}
             value={professeur}
             onChangeText={setProfesseur}
-            placeholder="Ex: M. Dupont"
-            placeholderTextColor="#C7C7CC"
+            placeholder="Ex : M. Dupont"
+            placeholderTextColor={colors.placeholder}
           />
 
-          <Text style={styles.label}>Heure de début</Text>
-          <TouchableOpacity
-            style={styles.heureBtn}
-            onPress={() => setShowHeureDebut(true)}
-          >
-            <Ionicons name="time-outline" size={20} color="#4A90D9" />
-            <Text style={styles.heureText}>
-              {heureDebutH}:{heureDebutM}
-            </Text>
-          </TouchableOpacity>
+          <View style={styles.heuresLigne}>
+            <View style={styles.heuresBloc}>
+              <Text style={[styles.label, { color: colors.textLight }]}>Début</Text>
+              <TouchableOpacity
+                style={[styles.heureBtn, { borderColor: colors.border, backgroundColor: colors.surface }]}
+                onPress={() => setPicker('debut')}
+              >
+                <Ionicons name="time-outline" size={18} color={colors.primary} />
+                <Text style={[styles.heureTexte, { color: colors.text }]}>
+                  {dh}:{dm}
+                </Text>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.heuresBloc}>
+              <Text style={[styles.label, { color: colors.textLight }]}>Fin</Text>
+              <TouchableOpacity
+                style={[styles.heureBtn, { borderColor: colors.border, backgroundColor: colors.surface }]}
+                onPress={() => setPicker('fin')}
+              >
+                <Ionicons name="time-outline" size={18} color={colors.primary} />
+                <Text style={[styles.heureTexte, { color: colors.text }]}>
+                  {fh}:{fm}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
 
-          <Text style={styles.label}>Heure de fin</Text>
-          <TouchableOpacity
-            style={styles.heureBtn}
-            onPress={() => setShowHeureFin(true)}
-          >
-            <Ionicons name="time-outline" size={20} color="#4A90D9" />
-            <Text style={styles.heureText}>
-              {heureFinH}:{heureFinM}
+          <View style={[styles.info, { backgroundColor: colors.primarySoft }]}>
+            <Ionicons name="notifications-outline" size={16} color={colors.primary} />
+            <Text style={[styles.infoTexte, { color: colors.primary }]}>
+              Une alarme « départ » sera automatiquement planifiée pour chaque occurrence de ce cours.
             </Text>
-          </TouchableOpacity>
+          </View>
         </ScrollView>
+
         <HeurePicker
-          visible={showHeureDebut}
-          heure={heureDebutH}
-          minute={heureDebutM}
-          onHeure={(h: string) => {
-            setHeureDebutH(h);
-            // Auto +2h pour la fin
-            const finH = (parseInt(h) + 2) % 24;
-            setHeureFinH(String(finH).padStart(2, "0"));
-          }}
-          onMinute={setHeureDebutM}
-          onClose={() => setShowHeureDebut(false)}
+          visible={picker === 'debut'}
           label="Heure de début"
+          heure={dh}
+          minute={dm}
+          onHeure={(h) => changerDebut(Number(h) * 60 + (Number(dm) || 0))}
+          onMinute={(m) => changerDebut((Number(dh) || 0) * 60 + Number(m))}
+          onClose={() => setPicker(null)}
         />
         <HeurePicker
-          visible={showHeureFin}
-          heure={heureFinH}
-          minute={heureFinM}
-          onHeure={setHeureFinH}
-          onMinute={setHeureFinM}
-          onClose={() => setShowHeureFin(false)}
+          visible={picker === 'fin'}
           label="Heure de fin"
+          heure={fh}
+          minute={fm}
+          onHeure={(h) => changerFin(Number(h) * 60 + (Number(fm) || 0))}
+          onMinute={(m) => changerFin((Number(fh) || 0) * 60 + Number(m))}
+          onClose={() => setPicker(null)}
         />
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#F5F7FA" },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: "#fff",
-    borderBottomWidth: 1,
-    borderBottomColor: "#E5E5EA",
-  },
-  title: { fontSize: 18, fontWeight: "700" },
-  save: { fontSize: 16, fontWeight: "700", color: "#4A90D9" },
-  form: { flex: 1, paddingHorizontal: 16, paddingTop: 16 },
-  label: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: "#8E8E93",
-    marginBottom: 4,
-    marginTop: 14,
-  },
-  input: {
-    backgroundColor: "#fff",
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    fontSize: 15,
-    borderWidth: 1,
-    borderColor: "#E5E5EA",
-    color: "#1A1A1A",
-  },
-  jourBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: "#fff",
-    borderWidth: 1,
-    borderColor: "#E5E5EA",
-  },
-  jourBtnActive: { backgroundColor: "#4A90D9", borderColor: "#4A90D9" },
-  jourText: { fontSize: 13, color: "#1A1A1A", fontWeight: "500" },
-  jourTextActive: { color: "#fff" },
-  heureBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#fff",
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderWidth: 1,
-    borderColor: "#E5E5EA",
-    gap: 10,
-  },
-  heureText: { fontSize: 16, color: "#1A1A1A", fontWeight: "600" },
-  pickerOverlay: {
-    position: "absolute",
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: "rgba(0,0,0,0.4)",
-    flex: 1,
-    justifyContent: "flex-end",
-  },
-  pickerContainer: {
-    backgroundColor: "#fff",
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    paddingBottom: 30,
-  },
-  pickerHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingHorizontal: 20,
-    paddingVertical: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: "#E5E5EA",
-  },
-  pickerTitle: { fontSize: 16, fontWeight: "700" },
-  pickerItem: {
-    paddingVertical: 12,
-    alignItems: "center",
-    borderRadius: 8,
-    marginHorizontal: 8,
-  },
-  pickerItemActive: { backgroundColor: "#E8F0FE" },
-  pickerItemText: { fontSize: 18, color: "#1A1A1A" },
-  pickerItemTextActive: { color: "#4A90D9", fontWeight: "700" },
-});
+const createStyles = (colors: ReturnType<typeof useThemeColors>) =>
+  StyleSheet.create({
+    container: { flex: 1 },
+    header: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: SPACING.md,
+      paddingVertical: 14,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+    },
+    title: { fontSize: 17, fontWeight: '800' },
+    save: { fontSize: 15, fontWeight: '800' },
+    form: { padding: SPACING.md, paddingBottom: 40 },
+    label: { fontSize: 12, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.4, marginTop: 14, marginBottom: 6 },
+    jours: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+    chip: {
+      paddingHorizontal: 13,
+      paddingVertical: 8,
+      borderRadius: RADIUS.pill,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surface,
+    },
+    chipTexte: { fontSize: 13, fontWeight: '700' },
+    input: {
+      borderRadius: RADIUS.md,
+      borderWidth: 1,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+      fontSize: 15,
+    },
+    heuresLigne: { flexDirection: 'row', gap: 12, marginTop: 4 },
+    heuresBloc: { flex: 1 },
+    heureBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      borderRadius: RADIUS.md,
+      borderWidth: 1,
+      paddingHorizontal: 12,
+      paddingVertical: 13,
+    },
+    heureTexte: { fontSize: 16, fontWeight: '700', fontVariant: ['tabular-nums'] },
+    info: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      borderRadius: RADIUS.md,
+      padding: 12,
+      marginTop: 18,
+    },
+    infoTexte: { flex: 1, fontSize: 12, fontWeight: '600', lineHeight: 17 },
+  });

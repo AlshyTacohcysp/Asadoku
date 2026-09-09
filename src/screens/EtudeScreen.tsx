@@ -1,182 +1,396 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, TextInput,
+  Alert,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { getAllCours, Cours } from '../services/CoursService';
-import { saveSession, getSessions, SessionRevision } from '../services/RevisionService';
+import { format } from 'date-fns';
+import { fr } from 'date-fns/locale';
+import { useFocusEffect } from '@react-navigation/native';
+import { useAppStyles, useThemeColors } from '../context/ThemeContext';
+import { getAllCours, type Cours } from '../services/CoursService';
+import { saveSession, getSessions, type SessionRevision } from '../services/RevisionService';
+import { getParametres } from '../services/ParametresService';
+import { formatChrono, formatDuree } from '../utils/format';
+import { RADIUS, SPACING } from '../constants/theme';
+import type { IconName } from '../navigation/types';
 
-const METHODES = [
-  { id: 'Pomodoro', nom: 'Pomodoro', icon: 'timer-outline', travail: 25*60, pause: 5*60, desc: '25 min + 5 min pause' },
-  { id: 'Feynman', nom: 'Feynman', icon: 'chatbubble-outline', travail: 30*60, pause: 10*60, desc: 'Expliquer à voix haute' },
-  { id: 'MindMap', nom: 'Mind Map', icon: 'git-branch-outline', travail: 45*60, pause: 15*60, desc: 'Carte mentale' },
-  { id: 'Exercices', nom: 'Exercices', icon: 'create-outline', travail: 60*60, pause: 10*60, desc: 'Exercices pratiques' },
-  { id: 'Lecture', nom: 'Lecture', icon: 'book-outline', travail: 30*60, pause: 10*60, desc: 'Lecture active' },
-  { id: 'Flashcards', nom: 'Flashcards', icon: 'card-outline', travail: 20*60, pause: 5*60, desc: 'Flashcards' },
+interface Methode {
+  id: string;
+  nom: string;
+  icon: IconName;
+  travail: number; // secondes
+  pause: number; // secondes
+  desc: string;
+}
+
+const METHODES: Methode[] = [
+  { id: 'Pomodoro', nom: 'Pomodoro', icon: 'timer-outline', travail: 25 * 60, pause: 5 * 60, desc: '25 min + 5 min de pause' },
+  { id: 'Feynman', nom: 'Feynman', icon: 'chatbubble-outline', travail: 30 * 60, pause: 10 * 60, desc: 'Expliquer à voix haute' },
+  { id: 'MindMap', nom: 'Mind Map', icon: 'git-branch-outline', travail: 45 * 60, pause: 15 * 60, desc: 'Carte mentale' },
+  { id: 'Exercices', nom: 'Exercices', icon: 'create-outline', travail: 60 * 60, pause: 10 * 60, desc: 'Exercices pratiques' },
+  { id: 'Lecture', nom: 'Lecture', icon: 'book-outline', travail: 30 * 60, pause: 10 * 60, desc: 'Lecture active' },
+  { id: 'Flashcards', nom: 'Flashcards', icon: 'card-outline', travail: 20 * 60, pause: 5 * 60, desc: 'Cartes mémoire' },
 ];
 
 export default function EtudeScreen() {
+  const colors = useThemeColors();
+  const styles = useAppStyles(createStyles);
+
   const [cours, setCours] = useState<Cours[]>([]);
-  const [selectedCours, setSelectedCours] = useState<number | null>(null);
-  const [selectedMethode, setSelectedMethode] = useState('Pomodoro');
-  const [timerRunning, setTimerRunning] = useState(false);
-  const [timerPaused, setTimerPaused] = useState(false);
-  const [timeLeft, setTimeLeft] = useState(25*60);
-  const [isPause, setIsPause] = useState(false);
-  const [cycles, setCycles] = useState(0);
+  const [coursChoisi, setCoursChoisi] = useState<number | null>(null);
+  const [methodeId, setMethodeId] = useState('Pomodoro');
   const [historique, setHistorique] = useState<SessionRevision[]>([]);
-  const [showHistorique, setShowHistorique] = useState(false);
-  const [sessionStart, setSessionStart] = useState<string | null>(null);
+  const [vue, setVue] = useState<'minuteur' | 'historique'>('minuteur');
+  const [rafraichissement, setRafraichissement] = useState(false);
   const [notes, setNotes] = useState('');
-  const [showNotes, setShowNotes] = useState(false);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
-  const currentMethode = METHODES.find(m => m.id === selectedMethode)!;
+  const [notesOuvertes, setNotesOuvertes] = useState(false);
 
-  useEffect(() => { loadData(); }, []);
-  useEffect(() => { return () => { if (intervalRef.current) clearInterval(intervalRef.current); }; }, []);
+  // Minuteur (époch-based : insensible à la dérive des setInterval).
+  const [phase, setPhase] = useState<'travail' | 'pause'>('travail');
+  const [resteMs, setResteMs] = useState(METHODES[0].travail * 1000);
+  const [actif, setActif] = useState(false); // le compte à rebours tourne
+  const [enPause, setEnPause] = useState(false); // pause manuelle
+  const [cycles, setCycles] = useState(0);
 
-  const loadData = async () => {
-    const [coursData, sessions] = await Promise.all([getAllCours(), getSessions()]);
-    setCours(coursData);
-    setHistorique(sessions);
-  };
+  const methode = METHODES.find((m) => m.id === methodeId) ?? METHODES[0];
+  const phaseRef = useRef<'travail' | 'pause'>('travail');
+  const finBlocRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dernierTickRef = useRef(0);
+  const focusSecRef = useRef(0); // travail effectif
+  const pauseSecRef = useRef(0); // temps de pause (auto + manuelle)
 
-  const startTimer = () => {
-    if (!sessionStart) setSessionStart(new Date().toISOString());
-    setTimerRunning(true); setTimerPaused(false);
-    intervalRef.current = setInterval(() => {
-      setTimeLeft(prev => {
-        if (prev <= 1) { clearInterval(intervalRef.current!); handleTimerEnd(); return 0; }
-        return prev - 1;
-      });
-    }, 1000);
-  };
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
 
-  const pauseTimer = () => { setTimerPaused(true); if (intervalRef.current) clearInterval(intervalRef.current); };
-  const resumeTimer = () => {
-    setTimerPaused(false);
-    intervalRef.current = setInterval(() => {
-      setTimeLeft(prev => {
-        if (prev <= 1) { clearInterval(intervalRef.current!); handleTimerEnd(); return 0; }
-        return prev - 1;
-      });
-    }, 1000);
-  };
+  const debutSessionRef = useRef(new Date().toISOString());
 
-  const stopTimer = () => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    const duree = currentMethode.travail - timeLeft;
-    saveSession({
-      cours_id: selectedCours, todo_id: null, methode: selectedMethode,
-      debut: sessionStart || new Date().toISOString(), fin: new Date().toISOString(),
-      duree_secondes: duree, notes,
-    });
-    loadData();
-    setTimerRunning(false); setTimerPaused(false);
-    setTimeLeft(currentMethode.travail); setIsPause(false);
-    setCycles(0); setSessionStart(null); setNotes(''); setShowNotes(false);
-  };
+  const majPhase = useCallback((p: 'travail' | 'pause') => {
+    phaseRef.current = p;
+    setPhase(p);
+  }, []);
 
-  const handleTimerEnd = () => {
-    if (!isPause) {
-      setCycles(c => c + 1); setIsPause(true);
-      setTimeLeft(currentMethode.pause);
-      Alert.alert('⏰ Pause !', `Cycle ${cycles+1} terminé. Pause de ${currentMethode.pause/60} min.`);
-      setTimerRunning(false);
-    } else {
-      setIsPause(false); setTimeLeft(currentMethode.travail);
-      Alert.alert('🔔 Reprise !', 'La pause est terminée !');
-      setTimerRunning(false);
+  const arreterTic = useCallback(() => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
     }
+  }, []);
+
+  const lancerCompteARebours = useCallback(
+    (dureeMs: number) => {
+      arreterTic();
+      finBlocRef.current = Date.now() + dureeMs;
+      dernierTickRef.current = Date.now();
+      setActif(true);
+      setEnPause(false);
+      timerRef.current = setInterval(() => {
+        const maintenant = Date.now();
+        const delta = Math.min(3, (maintenant - dernierTickRef.current) / 1000);
+        dernierTickRef.current = maintenant;
+        if (phaseRef.current === 'travail') focusSecRef.current += delta;
+        else pauseSecRef.current += delta;
+
+        const restant = finBlocRef.current - maintenant;
+        if (restant <= 0) {
+          // Fin de bloc : on enchaîne travail -> pause -> travail automatiquement.
+          arreterTic();
+          setActif(false);
+          if (phaseRef.current === 'travail') {
+            setCycles((c) => c + 1);
+            majPhase('pause');
+            setResteMs(methode.pause * 1000);
+            // Pause lancée automatiquement.
+            lancerCompteARebours(methode.pause * 1000);
+          } else {
+            majPhase('travail');
+            setResteMs(methode.travail * 1000);
+            lancerCompteARebours(methode.travail * 1000);
+          }
+          return;
+        }
+        setResteMs(restant);
+      }, 300);
+    },
+    [methode.pause, methode.travail, arreterTic, majPhase],
+  );
+
+  const demarrer = () => {
+    if (actif) return;
+    dernierTickRef.current = Date.now();
+    const duree = (phase === 'travail' ? methode.travail : methode.pause) * 1000;
+    setResteMs(duree);
+    lancerCompteARebours(duree);
   };
 
-  const selectMethode = (id: string) => {
-    if (timerRunning) { Alert.alert('Attention', 'Arrêtez le minuteur avant.'); return; }
-    setSelectedMethode(id);
-    setTimeLeft(METHODES.find(m => m.id === id)!.travail);
-    setIsPause(false);
+  const suspendre = () => {
+    arreterTic();
+    setActif(false);
+    setEnPause(true);
   };
 
-  const formatTime = (s: number) => `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`;
-  const formatDuree = (s: number) => { const m = Math.floor(s/60); return m < 60 ? `${m} min` : `${Math.floor(m/60)}h${m%60>0?' '+(m%60)+'min':''}`; };
+  const reprendre = () => {
+    lancerCompteARebours(resteMs);
+  };
+
+  const reinitialiserTout = useCallback(() => {
+    arreterTic();
+    setActif(false);
+    setEnPause(false);
+    setPhase('travail');
+    phaseRef.current = 'travail';
+    setResteMs(methode.travail * 1000);
+    setCycles(0);
+    focusSecRef.current = 0;
+    pauseSecRef.current = 0;
+    setNotes('');
+    setNotesOuvertes(false);
+  }, [arreterTic, methode.travail]);
+
+  const arreter = () => {
+    arreterTic();
+    const focusSec = Math.max(0, Math.round(focusSecRef.current));
+    const pauseSec = Math.max(0, Math.round(pauseSecRef.current));
+
+    if (focusSec < 20) {
+      Alert.alert('Session trop courte', 'Aucune session n’a été enregistrée (moins de 20 s de travail).');
+      reinitialiserTout();
+      return;
+    }
+
+    // Sauvegarde immédiate avant réinitialisation.
+    const session: Parameters<typeof saveSession>[0] = {
+      cours_id: coursChoisi,
+      todo_id: null,
+      methode: methode.id,
+      debut: debutSessionRef.current,
+      fin: new Date().toISOString(),
+      duree_secondes: focusSec,
+      nombre_cycles: cycles,
+      concentration: 3,
+      difficulte: 3,
+      notes,
+      progression: 0,
+      nombre_pauses: cycles > 0 ? cycles : enPause ? 1 : 0,
+      duree_pauses_secondes: pauseSec,
+    };
+    saveSession(session)
+      .then(() => {
+        Alert.alert(
+          'Session enregistrée ✅',
+          `${methode.nom} — ${formatDuree(focusSec)} de travail${cycles > 0 ? `, ${cycles} cycle(s)` : ''}${notes.trim() ? '. Notes conservées.' : ''}`,
+          [{ text: 'Parfait' }],
+        );
+      })
+      .catch(() => {
+        Alert.alert('Erreur', "Impossible d'enregistrer la session.");
+      })
+      .finally(() => {
+        chargerHistorique();
+        reinitialiserTout();
+      });
+  };
+
+  const charger = useCallback(async () => {
+    const [listeCours, sessions, params] = await Promise.all([
+      getAllCours(),
+      getSessions(),
+      getParametres(),
+    ]);
+    setCours(listeCours);
+    setHistorique(sessions);
+    // Méthode par défaut issue des paramètres (uniquement au premier chargement).
+    const parDefaut = METHODES.find((m) => m.id === params.methode_defaut);
+    setMethodeId((actuelle) => (actuelle === 'Pomodoro' && parDefaut ? parDefaut.id : actuelle));
+  }, []);
+
+  const chargerHistorique = useCallback(async () => {
+    setHistorique(await getSessions());
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      charger();
+    }, [charger]),
+  );
+
+  const choisirMethode = (id: string) => {
+    if (actif || enPause) {
+      Alert.alert('Session en cours', 'Arrêtez le minuteur avant de changer de méthode.');
+      return;
+    }
+    const m = METHODES.find((x) => x.id === id);
+    if (!m) return;
+    setMethodeId(id);
+    setResteMs(m.travail * 1000);
+    setCycles(0);
+    majPhase('travail');
+    focusSecRef.current = 0;
+    pauseSecRef.current = 0;
+  };
+
+  const peutDemarrer = !actif && !enPause;
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      <View style={styles.header}>
-        <Text style={styles.title}>⏱️ Étude</Text>
-        <TouchableOpacity onPress={() => setShowHistorique(!showHistorique)}>
-          <Text style={{ color: '#4A90D9', fontWeight: '600' }}>{showHistorique ? 'Minuteur' : 'Historique'}</Text>
-        </TouchableOpacity>
+    <SafeAreaView style={styles.screen} edges={['top']}>
+      <View style={[styles.header, { borderBottomColor: colors.border }]}>
+        <View>
+          <Text style={[styles.title, { color: colors.text }]}>⏱️ Étude</Text>
+          <Text style={[styles.sousTitre, { color: colors.textLight }]}>Pomodoro & techniques de révision</Text>
+        </View>
+        <View style={styles.headerActions}>
+          {[['minuteur', 'timer-outline'], ['historique', 'time-outline']].map(([v, icone]) => {
+            const actifVue = vue === v;
+            return (
+              <TouchableOpacity key={v} onPress={() => setVue(v as 'minuteur' | 'historique')} style={[styles.segmentVue, actifVue && { backgroundColor: colors.primary }]}>
+                <Ionicons name={icone as IconName} size={17} color={actifVue ? colors.onPrimary : colors.textLight} />
+                <Text style={[styles.segmentVueTexte, { color: actifVue ? colors.onPrimary : colors.textLight }]}>
+                  {v === 'minuteur' ? 'Minuteur' : 'Historique'}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
       </View>
-      {showHistorique ? (
-        <ScrollView style={{ padding: 16 }}>
-          <Text style={{ fontSize: 16, fontWeight: '700', marginBottom: 10 }}>📋 Sessions récentes</Text>
-          {historique.length === 0 ? <Text style={{ textAlign: 'center', color: '#8E8E93' }}>Aucune session</Text> :
-            historique.map(s => (
-              <View key={s.id} style={{ backgroundColor: '#fff', borderRadius: 12, padding: 14, marginBottom: 8, flexDirection: 'row', justifyContent: 'space-between' }}>
-                <Text style={{ fontWeight: '600' }}>{s.methode}</Text>
-                <Text style={{ color: '#4A90D9', fontWeight: '600' }}>{formatDuree(s.duree_secondes)}</Text>
-                <Text style={{ fontSize: 12, color: '#8E8E93' }}>{new Date(s.debut).toLocaleDateString('fr-FR')}</Text>
+
+      {vue === 'historique' ? (
+        <ScrollView
+          contentContainerStyle={styles.contenu}
+          refreshControl={<RefreshControl refreshing={rafraichissement} onRefresh={async () => { setRafraichissement(true); await chargerHistorique(); setRafraichissement(false); }} tintColor={colors.primary} />}
+        >
+          <Text style={[styles.sectionTitre, { color: colors.text }]}>Sessions récentes</Text>
+          {historique.length === 0 ? (
+            <Text style={[styles.vide, { color: colors.textLight }]}>
+              Aucune session pour le moment. Lancez votre premier minuteur !
+            </Text>
+          ) : (
+            historique.map((s) => (
+              <View key={s.id} style={[styles.historiqueItem, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+                <View style={[styles.historiqueIcone, { backgroundColor: colors.primarySoft }]}>
+                  <Text style={{ fontSize: 18 }}>{s.matiere ? '📚' : '🎯'}</Text>
+                </View>
+                <View style={styles.historiqueInfos}>
+                  <Text style={[styles.historiqueTitre, { color: colors.text }]} numberOfLines={1}>
+                    {s.matiere ? s.matiere : 'Séance libre'} · {s.methode}
+                  </Text>
+                  <Text style={[styles.historiqueMeta, { color: colors.textLight }]}>
+                    {format(new Date(s.debut), 'EEE d MMM · HH:mm', { locale: fr })}
+                    {s.nombre_cycles > 0 ? ` · ${s.nombre_cycles} cycle(s)` : ''}
+                  </Text>
+                </View>
+                <Text style={[styles.historiqueDuree, { color: colors.primary }]}>{formatDuree(s.duree_secondes)}</Text>
               </View>
             ))
-          }
+          )}
         </ScrollView>
       ) : (
-        <ScrollView style={{ padding: 16 }} contentContainerStyle={{ paddingBottom: 30 }}>
-          <Text style={{ fontSize: 16, fontWeight: '700', marginBottom: 10 }}>Méthode</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }}>
-            {METHODES.map(m => (
-              <TouchableOpacity key={m.id} style={[styles.methodeCard, selectedMethode===m.id && { backgroundColor: '#4A90D9' }]} onPress={() => selectMethode(m.id)}>
-                <Ionicons name={m.icon as any} size={24} color={selectedMethode===m.id?'#fff':'#4A90D9'} />
-                <Text style={{ fontWeight: '700', marginTop: 6, color: selectedMethode===m.id?'#fff':'#4A90D9' }}>{m.nom}</Text>
-                <Text style={{ fontSize: 11, textAlign: 'center', color: selectedMethode===m.id?'#fff':'#8E8E93' }}>{m.desc}</Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-          <Text style={{ fontSize: 16, fontWeight: '700', marginBottom: 10 }}>Matière</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 16 }}>
-            <TouchableOpacity style={[styles.coursBtn, selectedCours===null && { backgroundColor: '#4A90D9' }]} onPress={() => setSelectedCours(null)}>
-              <Text style={{ color: selectedCours===null?'#fff':'#1A1A1A' }}>Sans</Text>
-            </TouchableOpacity>
-            {cours.map(c => (
-              <TouchableOpacity key={c.id} style={[styles.coursBtn, selectedCours===c.id && { backgroundColor: '#4A90D9' }]} onPress={() => setSelectedCours(c.id)}>
-                <Text style={{ color: selectedCours===c.id?'#fff':'#1A1A1A' }}>{c.matiere}</Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-          <View style={{ backgroundColor: '#fff', borderRadius: 20, padding: 30, alignItems: 'center', elevation: 4 }}>
-            <Text style={{ fontSize: 18, fontWeight: '700', marginBottom: 10 }}>{isPause ? '🟢 PAUSE' : '🔴 TRAVAIL'}</Text>
-            <Text style={{ fontSize: 64, fontWeight: '800', fontFamily: 'monospace' }}>{formatTime(timeLeft)}</Text>
-            <Text style={{ color: '#8E8E93', marginTop: 8 }}>Cycles : {cycles}</Text>
-            <View style={{ flexDirection: 'row', gap: 16, marginTop: 24 }}>
-              {!timerRunning ? (
-                <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#34C759', paddingHorizontal: 24, paddingVertical: 14, borderRadius: 16, gap: 8 }} onPress={startTimer}>
-                  <Ionicons name="play" size={24} color="#fff" /><Text style={{ color: '#fff', fontSize: 18, fontWeight: '700' }}>Démarrer</Text>
+        <ScrollView contentContainerStyle={styles.contenu} showsVerticalScrollIndicator={false}>
+          {/* Méthodes */}
+          <Text style={[styles.sectionTitre, { color: colors.text }]}>Méthode</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.methodesRow}>
+            {METHODES.map((m) => {
+              const actifId = methodeId === m.id;
+              return (
+                <TouchableOpacity key={m.id} style={[styles.methodeCard, { backgroundColor: colors.surface, borderColor: actifId ? colors.primary : colors.border }]} onPress={() => choisirMethode(m.id)} activeOpacity={0.8}>
+                  <View style={[styles.methodeIcone, { backgroundColor: actifId ? colors.primary : colors.primarySoft }]}>
+                    <Ionicons name={m.icon} size={20} color={actifId ? colors.onPrimary : colors.primary} />
+                  </View>
+                  <Text style={[styles.methodeNom, { color: actifId ? colors.primary : colors.text }]}>{m.nom}</Text>
+                  <Text style={[styles.methodeDesc, { color: colors.textLight }]}>{m.desc}</Text>
                 </TouchableOpacity>
-              ) : timerPaused ? (
-                <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#34C759', paddingHorizontal: 24, paddingVertical: 14, borderRadius: 16, gap: 8 }} onPress={resumeTimer}>
-                  <Ionicons name="play" size={24} color="#fff" /><Text style={{ color: '#fff', fontSize: 18, fontWeight: '700' }}>Reprendre</Text>
+              );
+            })}
+          </ScrollView>
+
+          {/* Matières */}
+          <Text style={[styles.sectionTitre, { color: colors.text }]}>Matière</Text>
+          <View style={styles.wrap}>
+            <TouchableOpacity style={[styles.chip, coursChoisi === null && { backgroundColor: colors.primary, borderColor: colors.primary }]} onPress={() => setCoursChoisi(null)}>
+              <Text style={[styles.chipTexte, { color: coursChoisi === null ? colors.onPrimary : colors.text }]}>Séance libre</Text>
+            </TouchableOpacity>
+            {cours.map((c) => {
+              const actifId = coursChoisi === c.id;
+              return (
+                <TouchableOpacity key={c.id} style={[styles.chip, actifId && { backgroundColor: colors.primary, borderColor: colors.primary }]} onPress={() => setCoursChoisi(c.id)}>
+                  <Text style={[styles.chipTexte, { color: actifId ? colors.onPrimary : colors.text }]}>{c.matiere}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {/* Minuteur */}
+          <View style={[styles.timerCard, { backgroundColor: colors.surface }]}>
+            <Text style={[styles.phase, { color: phase === 'pause' ? colors.success : colors.danger }]}>
+              {phase === 'pause' ? '🟢 PAUSE' : enPause ? '⏸️ EN PAUSE' : '🔴 TRAVAIL'}
+            </Text>
+            <Text style={[styles.timer, { color: colors.text }]}>{formatChrono(Math.ceil(resteMs / 1000))}</Text>
+            <Text style={[styles.timerSous, { color: colors.textLight }]}>
+              {methode.nom} · {formatDuree((phase === 'pause' ? methode.pause : methode.travail) * 1000)} par bloc
+            </Text>
+
+            <View style={styles.cycles}>
+              {Array.from({ length: Math.max(1, cycles) }, (_, i) => (
+                <View key={i} style={[styles.cycleDone, { backgroundColor: colors.primary }]} />
+              ))}
+              <Text style={[styles.cyclesTexte, { color: colors.textLight }]}>
+                {cycles === 0 ? "Encore aucun cycle terminé" : `${cycles} cycle${cycles > 1 ? 's' : ''} terminé${cycles > 1 ? 's' : ''}`}
+              </Text>
+            </View>
+
+            <View style={styles.controles}>
+              {peutDemarrer ? (
+                <TouchableOpacity style={[styles.controle, { backgroundColor: colors.success }]} onPress={demarrer}>
+                  <Ionicons name="play" size={22} color="#fff" />
+                  <Text style={styles.controleTexte}>Démarrer</Text>
+                </TouchableOpacity>
+              ) : actif ? (
+                <TouchableOpacity style={[styles.controle, { backgroundColor: colors.warning }]} onPress={suspendre}>
+                  <Ionicons name="pause" size={22} color="#fff" />
+                  <Text style={styles.controleTexte}>Pause</Text>
                 </TouchableOpacity>
               ) : (
-                <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#FF9500', paddingHorizontal: 24, paddingVertical: 14, borderRadius: 16, gap: 8 }} onPress={pauseTimer}>
-                  <Ionicons name="pause" size={24} color="#fff" /><Text style={{ color: '#fff', fontSize: 18, fontWeight: '700' }}>Pause</Text>
+                <TouchableOpacity style={[styles.controle, { backgroundColor: colors.success }]} onPress={reprendre}>
+                  <Ionicons name="play" size={22} color="#fff" />
+                  <Text style={styles.controleTexte}>Reprendre</Text>
                 </TouchableOpacity>
               )}
-              {timerRunning && (
-                <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', paddingHorizontal: 24, paddingVertical: 14, borderRadius: 16, borderWidth: 2, borderColor: '#FF3B30', gap: 8 }} onPress={stopTimer}>
-                  <Ionicons name="stop" size={24} color="#FF3B30" /><Text style={{ color: '#FF3B30', fontSize: 18, fontWeight: '700' }}>Arrêter</Text>
+              {(actif || enPause) && (
+                <TouchableOpacity style={[styles.controle, { backgroundColor: colors.surfaceAlt, borderColor: colors.border, borderWidth: 1 }]} onPress={arreter}>
+                  <Ionicons name="stop" size={20} color={colors.danger} />
+                  <Text style={[styles.controleTexte, { color: colors.danger }]}>Arrêter</Text>
                 </TouchableOpacity>
               )}
             </View>
-            <TouchableOpacity style={{ marginTop: 16, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10, backgroundColor: '#E8F0FE' }} onPress={() => setShowNotes(!showNotes)}>
-              <Text style={{ color: '#4A90D9', fontWeight: '600' }}>📝 Notes</Text>
-            </TouchableOpacity>
-            {showNotes && (
+
+            <View style={styles.statutSession}>
+              <Text style={[styles.statutTexte, { color: colors.textLight }]}>
+                ⏱️ Travail : {formatDuree(focusSecRef.current || 0)} · ☕ Pause : {formatDuree(pauseSecRef.current || 0)}
+              </Text>
+              <TouchableOpacity onPress={() => setNotesOuvertes((v) => !v)} hitSlop={8}>
+                <Text style={[styles.notesToggle, { color: colors.primary }]}>{notesOuvertes ? 'Masquer' : '📝 Notes'}</Text>
+              </TouchableOpacity>
+            </View>
+
+            {notesOuvertes && (
               <TextInput
-                style={{ backgroundColor: '#F5F7FA', borderRadius: 12, padding: 14, marginTop: 12, fontSize: 14, height: 100, textAlignVertical: 'top', borderWidth: 1, borderColor: '#E5E5EA', width: '100%' }}
-                value={notes} onChangeText={setNotes}
-                placeholder="Vos notes..." placeholderTextColor="#C7C7CC" multiline
+                style={[styles.notes, { backgroundColor: colors.surfaceAlt, borderColor: colors.border, color: colors.text }]}
+                value={notes}
+                onChangeText={setNotes}
+                placeholder="Notes de la session (seront sauvegardées)…"
+                placeholderTextColor={colors.placeholder}
+                multiline
+                textAlignVertical="top"
               />
             )}
           </View>
@@ -186,10 +400,52 @@ export default function EtudeScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F5F7FA' },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12 },
-  title: { fontSize: 24, fontWeight: '700' },
-  methodeCard: { backgroundColor: '#fff', borderRadius: 14, padding: 14, marginRight: 10, width: 140, alignItems: 'center', borderWidth: 2, borderColor: '#E5E5EA' },
-  coursBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: '#fff', marginRight: 8, borderWidth: 1, borderColor: '#E5E5EA' },
-});
+const createStyles = (colors: ReturnType<typeof useThemeColors>) =>
+  StyleSheet.create({
+    screen: { flex: 1, backgroundColor: colors.background },
+    header: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: SPACING.md,
+      paddingTop: 10,
+      paddingBottom: 12,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+    },
+    title: { fontSize: 24, fontWeight: '800' },
+    sousTitre: { fontSize: 12, marginTop: 2 },
+    headerActions: { flexDirection: 'row', gap: 8 },
+    segmentVue: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, paddingVertical: 8, borderRadius: RADIUS.pill },
+    segmentVueTexte: { fontSize: 13, fontWeight: '700' },
+    contenu: { padding: SPACING.md, paddingBottom: 40 },
+    sectionTitre: { fontSize: 16, fontWeight: '800', marginBottom: 10, marginTop: 6 },
+    methodesRow: { gap: 10, paddingRight: 8 },
+    methodeCard: { width: 150, borderWidth: 1.5, borderRadius: RADIUS.lg, padding: 12, marginRight: 0 },
+    methodeIcone: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
+    methodeNom: { fontSize: 14, fontWeight: '800', marginTop: 8 },
+    methodeDesc: { fontSize: 11, marginTop: 3, lineHeight: 15 },
+    wrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 14 },
+    chip: { paddingHorizontal: 13, paddingVertical: 8, borderRadius: RADIUS.pill, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+    chipTexte: { fontSize: 13, fontWeight: '700' },
+    timerCard: { borderRadius: RADIUS.xl, padding: SPACING.lg, alignItems: 'center', shadowColor: colors.shadow, shadowOpacity: 0.07, shadowRadius: 10, shadowOffset: { width: 0, height: 4 }, elevation: 3 },
+    phase: { fontSize: 14, fontWeight: '800', letterSpacing: 1, textTransform: 'uppercase' },
+    timer: { fontSize: 62, fontWeight: '800', fontVariant: ['tabular-nums'], marginTop: 6, letterSpacing: 2 },
+    timerSous: { fontSize: 13, marginTop: 2 },
+    cycles: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 14, flexWrap: 'wrap', justifyContent: 'center' },
+    cycleDone: { width: 9, height: 9, borderRadius: 5 },
+    cyclesTexte: { fontSize: 12, marginLeft: 6 },
+    controles: { flexDirection: 'row', gap: 10, marginTop: 22 },
+    controle: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 22, paddingVertical: 13, borderRadius: RADIUS.md },
+    controleTexte: { color: '#fff', fontSize: 15, fontWeight: '800' },
+    statutSession: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 20, width: '100%' },
+    statutTexte: { fontSize: 12 },
+    notesToggle: { fontSize: 13, fontWeight: '700' },
+    notes: { width: '100%', minHeight: 90, borderWidth: 1, borderRadius: RADIUS.md, padding: 12, fontSize: 14, marginTop: 12, textAlignVertical: 'top' },
+    historiqueItem: { flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: RADIUS.md, borderWidth: 1, padding: 12, marginBottom: 10 },
+    historiqueIcone: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
+    historiqueInfos: { flex: 1 },
+    historiqueTitre: { fontSize: 15, fontWeight: '800' },
+    historiqueMeta: { fontSize: 12, marginTop: 3 },
+    historiqueDuree: { fontSize: 14, fontWeight: '800', fontVariant: ['tabular-nums'] },
+    vide: { textAlign: 'center', fontSize: 14, marginVertical: 30, lineHeight: 20 },
+  });

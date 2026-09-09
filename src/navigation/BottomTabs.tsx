@@ -1,49 +1,48 @@
-import React from "react";
-import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
-import { Ionicons } from "@expo/vector-icons";
-import { COLORS } from "../constants/theme";
+import React from 'react';
+import { StyleSheet } from 'react-native';
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { Ionicons } from '@expo/vector-icons';
+import { useTheme } from '../context/ThemeContext';
+import { TAB_ICONS, type RootTabParamList } from './types';
 
-// Imports classiques (stables)
-import DashboardScreen from "../screens/DashboardScreen";
-import CoursScreen from "../screens/CoursScreen";
-import TodosScreen from "../screens/TodosScreen";
-import EtudeScreen from "../screens/EtudeScreen";
-import ParametresScreen from "../screens/ParametresScreen";
-import StatsScreen from "../screens/StatsScreen";
+import DashboardScreen from '../screens/DashboardScreen';
+import CoursScreen from '../screens/CoursScreen';
+import TodosScreen from '../screens/TodosScreen';
+import EtudeScreen from '../screens/EtudeScreen';
+import StatsScreen from '../screens/StatsScreen';
+import ParametresScreen from '../screens/ParametresScreen';
 
-const Tab = createBottomTabNavigator();
+const Tab = createBottomTabNavigator<RootTabParamList>();
 
 export default function BottomTabs() {
+  const { colors } = useTheme();
+
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
         tabBarIcon: ({ focused, color, size }) => {
-          let iconName = "help-circle";
-          if (route.name === "Accueil")
-            iconName = focused ? "home" : "home-outline";
-          else if (route.name === "Cours")
-            iconName = focused ? "book" : "book-outline";
-          else if (route.name === "Tâches")
-            iconName = focused ? "checkbox" : "checkbox-outline";
-          else if (route.name === "Étude")
-            iconName = focused ? "timer" : "timer-outline";
-          else if (route.name === "Stats")
-            iconName = focused ? "stats-chart" : "stats-chart-outline";
-          else if (route.name === "Réglages")
-            iconName = focused ? "settings" : "settings-outline";
-          return <Ionicons name={iconName as any} size={size} color={color} />;
+          const icone = TAB_ICONS[route.name];
+          return (
+            <Ionicons
+              name={focused ? icone.active : icone.inactive}
+              size={size}
+              color={color}
+            />
+          );
         },
-        tabBarActiveTintColor: COLORS.primary,
-        tabBarInactiveTintColor: "#C7C7CC",
+        tabBarActiveTintColor: colors.primary,
+        tabBarInactiveTintColor: colors.textLight,
         tabBarStyle: {
-          backgroundColor: "#FFFFFF",
-          borderTopWidth: 0,
-          height: 60,
+          backgroundColor: colors.surface,
+          borderTopColor: colors.border,
+          borderTopWidth: StyleSheet.hairlineWidth,
+          height: 62,
           paddingBottom: 8,
-          paddingTop: 8,
+          paddingTop: 6,
         },
-        tabBarLabelStyle: { fontSize: 11, fontWeight: "600" },
+        tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
         headerShown: false,
+        sceneStyle: { backgroundColor: colors.background },
       })}
     >
       <Tab.Screen name="Accueil" component={DashboardScreen} />
