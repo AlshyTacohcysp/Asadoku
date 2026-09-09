@@ -1,9 +1,13 @@
-import { getDatabase } from "./database";
+import { getDatabase } from './database';
 
+/**
+ * Schéma de la base. Les instructions sont idempotentes (IF NOT EXISTS)
+ * et les évolutions de colonnes sont ajoutées via ALTER protégés.
+ */
 export async function createTables(): Promise<void> {
   const db = await getDatabase();
 
-  // Table PARAMETRES (configuration de l'étudiant)
+  // Table PARAMETRES (configuration de l'étudiant) — une seule ligne.
   await db.execAsync(`
     CREATE TABLE IF NOT EXISTS parametres (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -16,7 +20,8 @@ export async function createTables(): Promise<void> {
       adresse_domicile TEXT DEFAULT '',
       adresse_etablissement TEXT DEFAULT '',
       methode_defaut TEXT DEFAULT 'Pomodoro',
-      sonnerie TEXT DEFAULT 'default'
+      sonnerie TEXT DEFAULT 'default',
+      sonnerie_path TEXT DEFAULT ''
     );
   `);
 
@@ -54,7 +59,7 @@ export async function createTables(): Promise<void> {
     );
   `);
 
-  // Table ALARME
+  // Table ALARME (historique des déclenchements conservé à des fins de debug)
   await db.execAsync(`
     CREATE TABLE IF NOT EXISTS alarme (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,13 +109,24 @@ export async function createTables(): Promise<void> {
     );
   `);
 
-  console.log("✅ Tables créées avec succès !");
-  // Ajouter la colonne recurrence si elle n'existe pas
+  // ---- Évolutions appliquées aux bases créées par d'anciennes versions ----
+  await tryAlter(db, 'ALTER TABLE todo ADD COLUMN recurrence TEXT DEFAULT "none"');
+  await tryAlter(db, 'ALTER TABLE parametres ADD COLUMN sonnerie_path TEXT DEFAULT ""');
+
+  // ---- Index pour les requêtes quotidiennes ----
+  await db.execAsync(`
+    CREATE INDEX IF NOT EXISTS idx_cours_jour ON cours(jour, heure_debut);
+    CREATE INDEX IF NOT EXISTS idx_todo_date ON todo(date, fait);
+    CREATE INDEX IF NOT EXISTS idx_session_debut ON session_revision(debut);
+  `);
+
+  console.log('✅ Schéma de base vérifié');
+}
+
+async function tryAlter(db: import('expo-sqlite').SQLiteDatabase, sql: string) {
   try {
-    await db.execAsync(
-      'ALTER TABLE todo ADD COLUMN recurrence TEXT DEFAULT "none"',
-    );
-  } catch (e) {
-    // Colonne déjà existante
+    await db.execAsync(sql);
+  } catch {
+    // Colonne déjà présente : rien à faire.
   }
 }

@@ -1,204 +1,280 @@
-import * as Notifications from "expo-notifications";
-import { Cours } from "./CoursService";
+import * as Notifications from 'expo-notifications';
+import { Platform } from 'react-native';
+import { parseHeure, prochaineOccurrence } from '../utils/date';
+import { getAllCours, type Cours } from './CoursService';
+import { getAllTodos } from './TodoService';
+import { getParametres, totalAvanceMinutes } from './ParametresService';
 
-let snoozeCount: Record<string, number> = {};
+/**
+ * Planificateur unique de toutes les notifications de l'application.
+ *
+ * Philosophie : la base de données est la source de vérité. À chaque
+ * changement (cours ajouté/modifié/supprimé, tâche cochée, paramètres
+ * sauvegardés, import…), on appelle `syncNotifications()` qui recalcule
+ * intégralement l'échéancier (alarmes de cours + rappels de tâches).
+ */
 
-// Configurer le comportement des notifications (son, vibreur, affichage)
-export async function setupNotifications() {
+export const SNOOZE_MAX = 3;
+
+// iOS limite à 64 le nombre de notifications en attente.
+const BUDGET_TOTAL = 60;
+
+export interface SyncResult {
+  permission: boolean;
+  cours: number;
+  rappels: number;
+  ignores: number;
+}
+
+// ---------------------------------------------------------------------------
+// Configuration du canal Android + handler global
+// ---------------------------------------------------------------------------
+
+/** Configure le handler (premier plan) et les canaux Android. */
+export async function setupNotifications(): Promise<void> {
   await Notifications.setNotificationHandler({
     handleNotification: async () => ({
       shouldShowAlert: true,
       shouldPlaySound: true,
-      shouldSetBadge: true,
+      shouldSetBadge: false,
       shouldVibrate: true,
       priority: Notifications.AndroidNotificationPriority.HIGH,
     }),
   });
+
+  if (Platform.OS === 'android') {
+    // Canal principal (alarmes de cours) : son + vibration, priorité haute.
+    await Notifications.setNotificationChannelAsync('default', {
+      name: 'Alarmes et rappels',
+      importance: Notifications.AndroidImportance.HIGH,
+      vibrationPattern: [0, 500, 200, 500],
+      enableVibrate: true,
+      sound: 'default',
+    }).catch(() => {});
+  }
 }
 
-// Demander la permission
-export async function requestPermissions() {
+/** Demande l'autorisation de notification et renvoie l'état accordé. */
+export async function requestPermissions(): Promise<boolean> {
   const { status } = await Notifications.requestPermissionsAsync();
-  return status === "granted";
+  return status === 'granted';
 }
 
-// Calculer l'heure d'alarme
-export function calculateAlarmTime(
-  cours: Cours,
-  tempsPreparation: number,
-  tempsTrajet: number,
-  marge: number,
-): Date {
-  const [h, m] = cours.heure_debut.split(":").map(Number);
-  const coursDate = new Date();
-  coursDate.setHours(h, m, 0, 0);
-
-  const totalMinutes = tempsPreparation + tempsTrajet + marge;
-  const alarmDate = new Date(coursDate.getTime() - totalMinutes * 60 * 1000);
-
-  return alarmDate;
+/** État courant de l'autorisation. */
+export async function hasNotificationPermission(): Promise<boolean> {
+  const current = await Notifications.getPermissionsAsync();
+  return current.status === 'granted';
 }
 
-// Planifier une alarme pour un cours
-export async function scheduleAlarm(
-  cours: Cours,
-  tempsPreparation = 20,
-  tempsTrajet = 15,
-  marge = 5,
-  soundName?: string,
-) {
-  const alarmTime = calculateAlarmTime(
-    cours,
-    tempsPreparation,
-    tempsTrajet,
-    marge,
-  );
-  const now = new Date();
+// ---------------------------------------------------------------------------
+// Calcul des échéances
+// ---------------------------------------------------------------------------
 
-  // Si l'alarme est dans le passé, ne pas la planifier
-  if (alarmTime <= now) {
-    console.log(`⏰ Alarme ignorée pour ${cours.matiere} (déjà passée)`);
+interface AlarmeCours {
+  cours: Cours;
+  /** Départ (heure de l'alarme) pour la prochaine occurrence. */
+  depart: Date;
+  /** Début du cours correspondant. */
+  debutCours: Date;
+}
+
+/**
+ * Calcule l'alarme de la prochaine occurrence d'un cours : le jour de la
+ * semaine du cours est respecté (les jours passés cette semaine renvoient
+ * à la semaine suivante), et l'heure tient compte des délais utilisateur.
+ */
+export async function prochaineAlarmeCours(cours: Cours): Promise<AlarmeCours | null> {
+  const params = await getParametres();
+  const debut = prochaineOccurrence(cours.jour, cours.heure_debut);
+  const avance = totalAvanceMinutes(params);
+  const depart = new Date(debut.getTime() - avance * 60_000);
+
+  // L'alarme serait déjà dans le passé (cours trop proche) : inutile.
+  if (depart.getTime() <= Date.now()) return null;
+  return { cours, depart, debutCours: debut };
+}
+
+// ---------------------------------------------------------------------------
+// Synchronisation complète
+// ---------------------------------------------------------------------------
+
+/**
+ * Recalcule et replanifie l'intégralité des notifications.
+ * Appeler après chaque mutation des données (cours, tâches, paramètres, import).
+ */
+export async function syncNotifications(): Promise<SyncResult> {
+  const result: SyncResult = { permission: false, cours: 0, rappels: 0, ignores: 0 };
+
+  try {
+    const hasPerm = await hasNotificationPermission();
+    if (!hasPerm) return result;
+    result.permission = true;
+
+    // Annule tout (y compris snoozes obsolètes), puis reconstruit depuis la BDD.
+    await Notifications.cancelAllScheduledNotificationsAsync();
+
+    const params = await getParametres();
+    const coursList = await getAllCours();
+    const todos = await getAllTodos();
+
+    // 1. Alarmes de cours (prioritaires dans le budget iOS).
+    for (const cours of coursList) {
+      if (result.cours >= BUDGET_TOTAL) { result.ignores += 1; continue; }
+      const planning = await prochaineAlarmeCours(cours);
+      if (!planning) continue;
+
+      const identifiant = await scheduleNotification(
+        {
+          title: `🚨 Départ pour ${cours.matiere}`,
+          body: `Cours à ${cours.heure_debut} — ${cours.salle}${cours.professeur ? ` · ${cours.professeur}` : ''}. Alarme ${params.temps_preparation + params.temps_trajet + params.marge_securite} min avant.`,
+          soundName: soundPour(params),
+          data: {
+            kind: 'cours',
+            coursId: cours.id,
+            matiere: cours.matiere,
+            salle: cours.salle,
+            professeur: cours.professeur,
+            heureCours: cours.heure_debut,
+          },
+        },
+        planning.depart,
+      );
+      if (identifiant) result.cours += 1;
+    }
+
+    // 2. Rappels de tâches à venir (dans la limite du budget restant).
+    const budgetRestant = BUDGET_TOTAL - result.cours;
+    const futurs = todos
+      .filter((t) => !t.fait && t.heure_pensee)
+      .map((todo) => {
+        const { heures, minutes } = parseHeure(todo.heure_pensee);
+        const quand = new Date(`${todo.date}T00:00:00`);
+        quand.setHours(heures, minutes, 0, 0);
+        return { todo, quand };
+      })
+      .filter((x) => x.quand.getTime() > Date.now())
+      .sort((a, b) => a.quand.getTime() - b.quand.getTime())
+      .slice(0, budgetRestant);
+
+    for (const { todo, quand } of futurs) {
+      const identifiant = await scheduleNotification(
+        {
+          title: `📝 Rappel : ${todo.titre}`,
+          body: 'Pensez à faire cette tâche !',
+          soundName: 'default',
+          data: { kind: 'todo', todoId: todo.id, titre: todo.titre },
+        },
+        quand,
+      );
+      if (identifiant) result.rappels += 1;
+      else result.ignores += 1;
+    }
+  } catch (error) {
+    console.error('❌ Synchronisation des notifications :', error);
+    result.ignores += 1;
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Notification individuelle
+// ---------------------------------------------------------------------------
+
+async function scheduleNotification(
+  input: {
+    title: string;
+    body: string;
+    soundName: string;
+    data: Record<string, unknown>;
+  },
+  date: Date,
+): Promise<string | null> {
+  try {
+    return await Notifications.scheduleNotificationAsync({
+      content: {
+        title: input.title,
+        body: input.body,
+        sound: input.soundName,
+        data: input.data,
+        // Le canal Android par défaut est configuré avec son + vibration.
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date,
+        channelId: Platform.OS === 'android' ? 'default' : undefined,
+      },
+    });
+  } catch (error) {
+    console.warn('⚠️ Notification non planifiée :', error);
     return null;
   }
-
-  // Annuler les anciennes alarmes pour ce cours
-  await cancelAlarmByCoursId(cours.id);
-
-  const identifier = await Notifications.scheduleNotificationAsync({
-    content: {
-      title: `🚨 Départ pour ${cours.matiere} !`,
-      body: `Cours à ${cours.heure_debut} en ${cours.salle}\nProfesseur : ${cours.professeur}`,
-      sound: soundName ? soundName : "default",
-      vibrate: [0, 500, 200, 500],
-      data: {
-        coursId: cours.id,
-        matiere: cours.matiere,
-        salle: cours.salle,
-        professeur: cours.professeur,
-      },
-      priority: Notifications.AndroidNotificationPriority.HIGH,
-      categoryIdentifier: "alarm",
-    },
-    trigger: {
-      type: Notifications.SchedulableTriggerInputTypes.DATE,
-      date: alarmTime,
-    },
-  });
-
-  console.log(
-    `✅ Alarme planifiée pour ${cours.matiere} à ${alarmTime.toLocaleTimeString("fr-FR")}`,
-  );
-  return identifier;
 }
 
-// Planifier toutes les alarmes
-export async function scheduleAllAlarms(
-  cours: Cours[],
-  tempsPreparation = 20,
-  tempsTrajet = 15,
-  marge = 5,
-  soundName?: string,
-) {
-  await Notifications.cancelAllScheduledNotificationsAsync();
-
-  for (const c of cours) {
-    await scheduleAlarm(c, tempsPreparation, tempsTrajet, marge, soundName);
+/**
+ * Résout le son demandé. iOS attend un nom de fichier (ou « default ») :
+ * on extrait le nom du chemin choisi par l'utilisateur si un son
+ * personnalisé a été enregistré.
+ */
+function soundPour(params: { sonnerie: string; sonnerie_path: string }): string {
+  if (Platform.OS === 'ios' && params.sonnerie === 'custom' && params.sonnerie_path) {
+    return params.sonnerie_path.split('/').pop() || 'default';
   }
+  return 'default';
 }
 
-// Annuler une alarme
-export async function cancelAlarmByCoursId(coursId: number) {
-  const scheduled = await Notifications.getAllScheduledNotificationsAsync();
-  for (const notif of scheduled) {
-    if (notif.content.data?.coursId === coursId) {
-      await Notifications.cancelScheduledNotificationAsync(notif.identifier);
-    }
-  }
-}
+// ---------------------------------------------------------------------------
+// Snooze (report de 5 minutes, 3 max)
+// ---------------------------------------------------------------------------
 
-// export async function scheduleTodoAlarm(todo: { id: number; titre: string; date: string; heure_pensee: string }) {
-//   if (!todo.heure_pensee) return null;
-  
-//   const [h, m] = todo.heure_pensee.split(':').map(Number);
-//   const alarmDate = new Date(todo.date);
-//   alarmDate.setHours(h, m, 0, 0);
-  
-//   if (alarmDate <= new Date()) return null;
-  
-//   return await Notifications.scheduleNotificationAsync({
-//     content: {
-//       title: `📝 Rappel : ${todo.titre}`,
-//       body: 'Pensez à faire cette tâche !',
-//       sound: true,
-//       vibrate: [0, 300, 200, 300],
-//       data: { todoId: todo.id },
-//       priority: Notifications.AndroidNotificationPriority.HIGH,
-//     },
-//     trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: alarmDate },
-//   });
-// }
-
-
-
-// Snooze une alarme (report de 5 min, max 3 fois)
+/** Reporte une alarme de cours de 5 minutes (action "Snooze" de la notification). */
 export async function snoozeAlarm(
-  notificationId: string,
+  _notificationId: string,
   coursId: number,
   matiere: string,
   salle: string,
   professeur: string,
-) {
+): Promise<boolean> {
   const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+  const snoozes = scheduled.filter(
+    (n) => n.content.data?.coursId === coursId && n.content.data?.snooze === true,
+  ).length;
 
-  // Compter les snooze existants pour ce cours
-  let snoozeCount = 0;
-  for (const notif of scheduled) {
-    if (notif.content.data?.coursId === coursId && notif.content.data?.snooze) {
-      snoozeCount++;
-    }
+  if (snoozes >= SNOOZE_MAX) return false;
+
+  try {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: `🔔 Rappel : ${matiere}`,
+        body: `Cours à ${salle}${professeur ? ` — ${professeur}` : ''} (Snooze ${snoozes + 1}/${SNOOZE_MAX})`,
+        sound: 'default',
+        data: { kind: 'cours', coursId, matiere, salle, professeur, snooze: true },
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+        seconds: 5 * 60,
+        channelId: Platform.OS === 'android' ? 'default' : undefined,
+      },
+    });
+    return true;
+  } catch (error) {
+    console.warn('⚠️ Snooze impossible :', error);
+    return false;
   }
-
-  if (snoozeCount >= 3) {
-    return false; // Max 3 snooze atteint
-  }
-
-  // Planifier un rappel dans 5 minutes
-  await Notifications.scheduleNotificationAsync({
-    content: {
-      title: `🔔 Rappel : ${matiere} !`,
-      body: `Cours à ${salle} - Professeur : ${professeur}\n(Snooze ${snoozeCount + 1}/3)`,
-      sound: true,
-      vibrate: [0, 500, 200, 500],
-      data: { coursId, snooze: true },
-      priority: Notifications.AndroidNotificationPriority.HIGH,
-      categoryIdentifier: "alarm",
-    },
-    trigger: {
-      type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-      seconds: 5 * 60, // 5 minutes
-    },
-  });
-
-  return true;
 }
 
-export async function scheduleTodoAlarm(todo: { id: number; titre: string; date: string; heure_pensee: string }) {
-  if (!todo.heure_pensee) return null;
-  
-  const [h, m] = todo.heure_pensee.split(':').map(Number);
-  const alarmDate = new Date(todo.date);
-  alarmDate.setHours(h, m, 0, 0);
-  
-  if (alarmDate <= new Date()) return null;
-  
-  return await Notifications.scheduleNotificationAsync({
-    content: {
-      title: `📝 ${todo.titre}`,
-      body: 'Pensez à faire cette tâche !',
-      sound: true,
-      vibrate: [0, 300, 200, 300],
-      data: { todoId: todo.id },
+/** Catégorie d'actions affichée sur les notifications d'alarme. */
+export async function configureAlarmCategory(): Promise<void> {
+  await Notifications.setNotificationCategoryAsync('alarm', [
+    {
+      identifier: 'snooze',
+      buttonTitle: 'Snooze (5 min)',
+      options: { opensAppToForeground: false },
     },
-    trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: alarmDate },
-  });
+    {
+      identifier: 'ok',
+      buttonTitle: 'OK',
+      options: { opensAppToForeground: false },
+    },
+  ]);
 }
